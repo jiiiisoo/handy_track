@@ -1,0 +1,161 @@
+params:
+  seed: ${...seed}
+  algo:
+    name: ppo
+
+  model:
+    name: ${res_side:${....side},my_continuous_a2c_logstd}
+    base_model_obs_shape:
+      privileged: ${...base_privileged_dim}
+      proprioception: ${...base_proprioception_dim}
+      target: ${...base_target_dim}
+    # base_model_checkpoint: ${..base_model_checkpoint}
+    rh_base_model_checkpoint: ${..rh_base_model_checkpoint}
+    lh_base_model_checkpoint: ${..lh_base_model_checkpoint}
+
+  network:
+    name: ${res_side:${....side},dict_obs_actor_critic}
+    separate: False
+
+    space:
+      continuous:
+        mu_activation: None
+        sigma_activation: None
+        mu_init:
+          name: glorot_normal_initializer
+          gain: 0.01
+        sigma_init:
+          name: const_initializer
+          val: -1
+        fixed_sigma: True
+
+    dict_feature_encoder:
+      _target_: lib.nn.features.SimpleFeatureFusion
+      extractors:
+        privileged:
+          _target_: lib.nn.features.Identity
+          input_dim: ${is_united_model:${.......bimanual_mode},${.......side},${eval:'${.....base_privileged_dim}+13+5*4+3+1'}}
+        proprioception:
+          _target_: lib.nn.features.Identity
+          input_dim: ${is_united_model:${.......bimanual_mode},${.......side},${.....base_proprioception_dim}}
+        target:
+          _target_: lib.nn.features.Identity
+          input_dim: ${is_united_model:${.......bimanual_mode},${.......side},${eval:'${.....base_target_dim}+3+3+3+4+4+3+3+${nbody:${.....dexhand}}+5+128'}}
+      hidden_depth: 3
+      hidden_dim: 512
+      output_dim: 256
+      activation: "swish"
+      add_input_activation: false
+      add_output_activation: false
+
+    mlp:
+      units: [256, 512, 128, 64]
+      activation: elu
+      d2rl: False
+
+      initializer:
+        name: default
+      regularizer:
+        name: None
+
+    base_model:
+      name: dict_obs_actor_critic
+      # checkpoint: ${...base_model_checkpoint}
+      rh_checkpoint: ${...rh_base_model_checkpoint}
+      lh_checkpoint: ${...lh_base_model_checkpoint}
+      separate: False
+      action_size: ${eval:'6+${ndof:${...dexhand}}'}
+
+      space:
+        continuous:
+          mu_activation: None
+          sigma_activation: None
+          mu_init:
+            name: default
+          sigma_init:
+            name: const_initializer
+            val: 0
+          fixed_sigma: True
+
+      dict_feature_encoder:
+        _target_: lib.nn.features.SimpleFeatureFusion
+        extractors:
+          privileged:
+            _target_: lib.nn.features.Identity
+            input_dim: ${......base_privileged_dim}
+          proprioception:
+            _target_: lib.nn.features.Identity
+            input_dim: ${......base_proprioception_dim}
+          target:
+            _target_: lib.nn.features.Identity
+            input_dim: ${......base_target_dim}
+        hidden_depth: 3
+        hidden_dim: 512
+        output_dim: 256
+        activation: "swish"
+        add_input_activation: false
+        add_output_activation: false
+
+      mlp:
+        units: [256, 512, 128, 64]
+        activation: elu
+        d2rl: False
+
+        initializer:
+          name: default
+        regularizer:
+          name: None
+
+  load_checkpoint: ${if:${...checkpoint},True,False} # flag which sets whether to load the checkpoint
+  load_path: ${...checkpoint} # path to the checkpoint to load
+  # base_model_checkpoint: runs/ckpt/righthand_1030_final.pth
+  rh_base_model_checkpoint: ${...rh_base_model_checkpoint}
+  lh_base_model_checkpoint: ${...lh_base_model_checkpoint}
+  dexhand: ${...dexhand}
+  base_privileged_dim: ${ndof:${dexhand}}
+  base_proprioception_dim: ${eval:'13+${ndof:${...dexhand}}*3'}
+  base_target_dim: ${eval:'3+3+3+4+4+3+3+(${nbody:${...dexhand}}-1)*3*3'}
+
+
+  config:
+    name: ${resolve_default:ResDexHand,${....experiment}}
+    full_experiment_name: ${.name}
+    env_name: rlgpu
+    multi_gpu: ${....multi_gpu}
+    ppo: True
+    mixed_precision: False
+    normalize_input: True
+    normalize_input_excluded_keys: []
+    normalize_value: True
+    use_pid_control: ${....usePIDControl}
+    value_bootstrap: True
+    num_actors: ${....task.env.numEnvs}
+    reward_shaper:
+      scale_value: 1.0
+    normalize_advantage: True
+    gamma: 0.99
+    tau: 0.95
+    learning_rate: ${resolve_default:5e-4,${....learning_rate}}
+    lr_schedule: warmup
+    warmup_steps: 10
+    schedule_type: standard
+    kl_threshold: 0.008
+    score_to_win: 10000
+    max_epochs: ${resolve_default:10000,${....max_iterations}}
+    early_stop_epochs: ${resolve_default:500,${....early_stop_epochs}}
+    save_best_after: 2
+    save_frequency: 100
+    print_stats: True
+    grad_norm: 1.0
+    entropy_coef: 0.0
+    truncate_grads: True
+    e_clip: 0.2
+    horizon_length: 32
+    minibatch_size: 1024
+    mini_epochs: 5
+    critic_coef: 4
+    clip_value: True
+    seq_len: 4
+    bounds_loss_coef: 0.0001
+    use_soft_clamp: True
+    mix_ratio: 0.5
