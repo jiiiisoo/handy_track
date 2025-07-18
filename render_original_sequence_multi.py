@@ -335,13 +335,13 @@ if __name__ == "__main__":
             {
                 "name": "--data_dir",
                 "type": str,
-                "default": "/mnt/ssd1/jisoo6687/hoi_dataset/gigahands",
+                "default": "/scratch2/jisoo6687/gigahands",
                 "help": "Path to GigaHands dataset directory"
             },
             {
                 "name": "--seq_id",
                 "type": str,
-                "default": "p001-folder_000",
+                "default": "p001-folder_001",
                 "help": "Sequence ID (e.g., '20aed@0')"
             },
             {

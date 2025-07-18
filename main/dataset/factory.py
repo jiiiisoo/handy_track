@@ -16,15 +16,25 @@ class ManipDataFactory:
         assert side in ["left", "right"], f"Invalid side '{side}', must be 'left' or 'right'."
         """Create a data instance by type."""
         
+        # data_type argument로 명시적 데이터셋 타입 선택 가능
+        data_type = kwargs.pop("data_type", None)  # kwargs에서 제거, 없으면 None
+        if data_type is not None:
+            manipdata_type = data_type
+
+        
         # GigaHands는 양손 데이터를 모두 포함하므로 side 구분 없이 처리
         if manipdata_type == "gigahands":
             # GigaHands 데이터셋을 직접 로드
             try:
                 from .gigahands_dataset import GigaHandsDataset
-                return GigaHandsDataset(*args, **kwargs)
+                return GigaHandsDataset(*args, side=side, **kwargs)
             except ImportError as e:
                 raise ValueError(f"Failed to import GigaHands dataset: {e}")
+        elif manipdata_type == "oakink2":
+            # OakInk2 데이터셋 처리
+            manipdata_type += "_rh" if side == "right" else "_lh"
         else:
+            # 기타 데이터셋들
             manipdata_type += "_rh" if side == "right" else "_lh"
             
         if manipdata_type not in cls._registry:
@@ -66,6 +76,10 @@ class ManipDataFactory:
                 dtype = "gigahands"
             else:
                 dtype = "oakink2"
+        elif type(index) == str and "_" in index and index.startswith("p"):
+            # 새로운 GigaHands 형식: "p019-makeup_063"
+            # p로 시작하고 언더스코어를 포함하는 경우 GigaHands로 인식
+            dtype = "gigahands"
         elif type(index) == str and index.startswith("g"):
             dtype = "grabdemo"
         elif type(index) == str and index.startswith("v"):

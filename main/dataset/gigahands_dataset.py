@@ -18,6 +18,7 @@ except ImportError:
     # Isaac Gym 관련 의존성이 없는 경우 기본 Dataset 클래스 사용
     from torch.utils.data import Dataset
     BASE_CLASS = Dataset
+from manopth.manolayer import ManoLayer
 
 
 class GigaHandsDataset(BASE_CLASS):
@@ -34,7 +35,7 @@ class GigaHandsDataset(BASE_CLASS):
         mujoco2gym_transf=None,
         max_seq_len=int(1e10),
         dexhand=None,
-        verbose=True,
+        verbose=False,
         data_indices: List[str] = None,
         max_motion_length: int = 51,
         embodiment: str = "inspire",
@@ -73,14 +74,18 @@ class GigaHandsDataset(BASE_CLASS):
         self.data_indices = data_indices if data_indices else []
         self.embodiment = embodiment
         self.side = side
-        self.mujoco2gym_transf = mujoco2gym_transf
+        # Ensure mujoco2gym_transf is on the correct device
+        if mujoco2gym_transf is None:
+            self.mujoco2gym_transf = torch.eye(4, dtype=torch.float32, device=device)
+        else:
+            self.mujoco2gym_transf = mujoco2gym_transf.to(device) if hasattr(mujoco2gym_transf, 'to') else mujoco2gym_transf
         
         # 기본값들 초기화
         self.data_pathes = []
         self.sequence_info = []
         
         # Load annotations
-        self.text_file = os.path.join(data_dir, '../annotations_v2.jsonl')
+        self.json_file = os.path.join(data_dir, '../annotations_v2.jsonl')
         
         # Load mean and std for normalization
         self.mean_path = os.path.join(data_dir, '../giga_mean_kp.npy')
@@ -105,12 +110,44 @@ class GigaHandsDataset(BASE_CLASS):
         """데이터 경로를 로드합니다."""
         self.data_pathes = []
         self.sequence_info = []
-        
-        with open(self.text_file, 'r', encoding='utf-8') as file:
+
+                # JSONL 형식으로 로드 (각 라인이 별도의 JSON 객체)
+        with open(self.json_file, 'r', encoding='utf-8') as file:
             all_sequences = []
-            for line in file:
-                script_info = json.loads(line)
-                all_sequences.append(script_info)
+            # data_indices가 주어진 경우, 해당 시퀀스들을 찾기 위해 필요한 만큼 로드
+            if self.data_indices:
+                needed_sequences = set()
+                for data_idx in self.data_indices:
+                    if '@' in data_idx:
+                        seq_id, _ = data_idx.split('@')
+                    else:
+                        seq_id = data_idx
+                    needed_sequences.add(seq_id)
+                
+                found_sequences = set()
+                for i, line in enumerate(file):
+                    line = line.strip()
+                    if line:  # 빈 라인 스킵
+                        script_info = json.loads(line)
+                        all_sequences.append(script_info)
+                        
+                        # 현재 시퀀스가 필요한 시퀀스 중 하나인지 확인
+                        current_seq_id = script_info.get('sequence_id', '')
+                        if current_seq_id in needed_sequences:
+                            found_sequences.add(current_seq_id)
+                        
+                        # 모든 필요한 시퀀스를 찾았으면 로딩 중단
+                        if len(found_sequences) >= len(needed_sequences):
+                            break
+            else:
+                for i, line in enumerate(file):
+                    line = line.strip()
+                    if line:  # 빈 라인 스킵
+                        script_info = json.loads(line)
+                        all_sequences.append(script_info)
+
+        if self.verbose:
+            cprint(f"Loaded annotations as JSONL format: {len(all_sequences)} sequences", "green")
         
         # 특정 indices가 지정된 경우 해당 데이터만 로드
         if self.data_indices:
@@ -124,36 +161,67 @@ class GigaHandsDataset(BASE_CLASS):
                     seq_id = data_idx
                     frame_idx = 0
                 
-                if self.verbose:
-                    cprint(f"Searching for sequence: {seq_id}", "cyan")
-                
-                # 시퀀스 찾기
+                # 시퀀스 찾기 - 새로운 형식 지원
                 found = False
-                for script_info in all_sequences:
-                    seq = script_info['sequence'][0] if isinstance(script_info['sequence'], list) else script_info['sequence']
-                    # 정확한 매칭 또는 부분 매칭
-                    if seq == seq_id or seq.startswith(seq_id) or seq_id in seq:
-                        sf, ef = script_info['start_frame_id'], script_info['end_frame_id']
-                        scene_name = script_info['scene']
-                        script_text = script_info['clarify_annotation']
+                
+                # scene_sequence 형태인지 확인 (예: "p019-makeup_063")
+                if '_' in seq_id and not '/' in seq_id:
+                    target_scene, target_seq = seq_id.rsplit('_', 1)  # 마지막 '_'로 분리
+                    
+                    for script_info in all_sequences:
+                        scene = script_info['scene']
+                        seq = script_info['sequence'][0] if isinstance(script_info['sequence'], list) else script_info['sequence']
                         
-                        # keypoints 경로 생성
-                        v_path = os.path.join(self.data_dir, scene_name, 'keypoints_3d_mano', seq + '.json')
-                        
-                        if os.path.exists(v_path) and script_text != 'None' and script_text != 'Buggy':
-                            self.data_pathes.append(v_path)
-                            self.sequence_info.append({
-                                'path': v_path,
-                                'chosen_frames': (sf, ef),
-                                'sequence_id': seq,
-                                'scene': scene_name,
-                                'caption': script_text,
-                                'frame_offset': frame_idx
-                            })
-                            if self.verbose:
-                                cprint(f"Added sequence: {seq} from {scene_name}", "blue")
-                            found = True
-                            break
+                        # scene과 sequence가 모두 일치하는지 확인
+                        if scene == target_scene and seq == target_seq:
+                            sf, ef = script_info['start_frame_id'], script_info['end_frame_id']
+                            scene_name = script_info['scene']
+                            script_text = script_info['clarify_annotation']
+                            
+                            # keypoints 경로 생성
+                            v_path = os.path.join(self.data_dir, scene_name, 'keypoints_3d_mano', seq + '.json')
+                            
+                            if os.path.exists(v_path) and script_text != 'None' and script_text != 'Buggy':
+                                self.data_pathes.append(v_path)
+                                self.sequence_info.append({
+                                    'path': v_path,
+                                    'chosen_frames': (sf, ef),
+                                    'sequence_id': seq,
+                                    'scene': scene_name,
+                                    'caption': script_text,
+                                    'frame_offset': frame_idx
+                                })
+                                if self.verbose:
+                                    cprint(f"Added sequence: {seq} from {scene_name}", "blue")
+                                found = True
+                                break  # 첫 번째 매칭되는 것만 사용
+                else:
+                    # 기존 방식 (하위 호환성)
+                    for script_info in all_sequences:
+                        seq = script_info['sequence'][0] if isinstance(script_info['sequence'], list) else script_info['sequence']
+                        # 정확한 매칭 또는 부분 매칭
+                        if seq == seq_id or seq.startswith(seq_id) or seq_id in seq:
+                            sf, ef = script_info['start_frame_id'], script_info['end_frame_id']
+                            scene_name = script_info['scene']
+                            script_text = script_info['clarify_annotation']
+                            
+                            # keypoints 경로 생성
+                            v_path = os.path.join(self.data_dir, scene_name, 'keypoints_3d_mano', seq + '.json')
+                            
+                            if os.path.exists(v_path) and script_text != 'None' and script_text != 'Buggy':
+                                self.data_pathes.append(v_path)
+                                self.sequence_info.append({
+                                    'path': v_path,
+                                    'chosen_frames': (sf, ef),
+                                    'sequence_id': seq,
+                                    'scene': scene_name,
+                                    'caption': script_text,
+                                    'frame_offset': frame_idx
+                                })
+                                if self.verbose:
+                                    cprint(f"Added sequence: {seq} from {scene_name}", "blue")
+                                found = True
+                                break
                 
                 if not found and self.verbose:
                     cprint(f"Warning: No sequence found for index: {seq_id}", "yellow")
@@ -241,7 +309,7 @@ class GigaHandsDataset(BASE_CLASS):
     def _convert_to_manip_format(self, motion: torch.Tensor, seq_info: Dict) -> Dict:
         """GigaHands 모션 데이터를 ManipTrans 형식으로 변환합니다."""
         # motion: [T, 126] -> [T, 42, 3] (42개 키포인트, 각각 x,y,z)
-        motion_reshaped = motion.view(-1, 42, 3)
+        motion_reshaped = motion.view(-1, 42, 3).to(self.device)
         if self.side == "right" :
             motion_reshaped = motion_reshaped[:,:21,:]
         else : 
@@ -288,20 +356,53 @@ class GigaHandsDataset(BASE_CLASS):
             "pinky_distal": motion_reshaped[:, 19, :].detach(),   # 19 (dip)
             "pinky_tip": motion_reshaped[:, 20, :].detach()
         }
-        # 손목 회전 (더미 값)
-        # wrist_rot = torch.zeros(T, 3, device=self.device)
-        print(f'motion reshaped: {motion_reshaped.shape}')
-        transform_abs = torch.load("/workspace/ManipTrans/transform_abs.pt")
+        # 손목 회전 계산
+        # mano_layer = ManoLayer(
+        #     center_idx=0,
+        #     flat_hand_mean=True,
+        #     num_betas=10,
+        #     num_joints=21,
+        # )
+        # hand_verts, hand_faces = mano_layer(
+        #     pose=motion_reshaped[:, 3:66, :],
+        #     betas=motion_reshaped[:, 66:66+10, :],
+        #     hand_type="right",
+        # )
+        # print(f'hand_verts: {hand_verts.shape}')
+        # transform_abs = torch.load("/scratch2/jisoo6687/handy_track/transform_abs.pt")
+        transform_abs = torch.ones(motion_reshaped.shape[0], 16, 4, 4)
+
         wrist_pos = motion_reshaped[:, 0, :].detach()
         middle_pos = motion_reshaped[:, 9, :].detach()
         wrist_pos = wrist_pos - (middle_pos - wrist_pos) * 0.25  # ? hack for wrist position
         dexhand = DexHandFactory.create_hand(dexhand_type="inspire", side="right")
         wrist_pos += torch.tensor(dexhand.relative_translation, device=self.device)
         mano_rot_offset = dexhand.relative_rotation
-        wrist_rot_matrix = transform_abs[:, 0, :3, :3].detach() @ np.repeat(mano_rot_offset[None], transform_abs.shape[0], axis=0)
-        wrist_rot_tensor = torch.tensor(wrist_rot_matrix, dtype=torch.float32)
-        wrist_rot = rotmat_to_aa(wrist_rot_tensor).detach()  # [T, 3] angle-axis 형태
-        # wrist_rot = torch.zeros(T, 3, device=self.device)
+        wrist_rot = transform_abs[:, 0, :3, :3].detach() @ np.repeat(mano_rot_offset[None], transform_abs.shape[0], axis=0)
+        wrist_rot = wrist_rot.to(self.device)
+        
+        # Object trajectory 계산: 손가락 팁들의 중심점
+        finger_tips = [
+            gigahands_mano_joints["thumb_tip"],
+            gigahands_mano_joints["index_tip"], 
+            gigahands_mano_joints["middle_tip"],
+            gigahands_mano_joints["ring_tip"],
+            gigahands_mano_joints["pinky_tip"]
+        ]
+        
+        # 손가락 팁들의 평균 위치를 object center로 계산
+        finger_tips_stack = torch.stack(finger_tips, dim=1)  # [T, 5, 3]
+        obj_center_pos = torch.mean(finger_tips_stack, dim=1)  # [T, 3]
+        
+        # Object trajectory를 4x4 transformation matrix 형태로 생성
+        T = obj_center_pos.shape[0]
+        obj_trajectory = torch.eye(4, device=self.device).unsqueeze(0).repeat(T, 1, 1)  # [T, 4, 4]
+        obj_trajectory[:, :3, 3] = obj_center_pos  # position 설정
+        
+        # 더미 object mesh (작은 구형태)
+        obj_id = f"dummy_object_{seq_info['sequence_id']}"
+        obj_mesh_path = f"dummy_path_{seq_info['sequence_id']}.obj"
+        
         if self.side == "left":
             for name in gigahands_mano_joints:
                 gigahands_mano_joints[name] = gigahands_mano_joints[name].clone()
@@ -309,11 +410,16 @@ class GigaHandsDataset(BASE_CLASS):
             wrist_pos = wrist_pos.clone()
             wrist_pos[:, 1] *= -1
             wrist_rot = wrist_rot.clone()
+            # Object trajectory도 Y축 반전
+            obj_trajectory[:, :3, 3][:, 1] *= -1
         
         data = {
             "wrist_pos": wrist_pos,
             "wrist_rot": wrist_rot,
             "mano_joints": gigahands_mano_joints,
+            "obj_id": obj_id,
+            "obj_mesh_path": obj_mesh_path,
+            "obj_trajectory": obj_trajectory,
             "sequence_info": seq_info,
             "motion_length": motion.shape[0]
         }
@@ -323,36 +429,79 @@ class GigaHandsDataset(BASE_CLASS):
     def __getitem__(self, index):
         """데이터셋에서 하나의 시퀀스를 가져옵니다."""
         
-        # 문자열 인덱스 처리 (예: "20aed@0")
+        # 데이터 변수 초기화
+        data = None
+        
+        # 문자열 인덱스 처리 (예: "20aed@0" 또는 "p019-makeup_063")
         if isinstance(index, str):
             if "@" in index:
                 seq_id, frame_offset = index.split("@")
                 frame_offset = int(frame_offset)
             else:
                 seq_id = index
-                frame_offset = 0
-                
-            # 해당 시퀀스 찾기
-            for i, seq_info in enumerate(self.sequence_info):
-                if seq_id in seq_info['sequence_id'] or seq_info['sequence_id'].startswith(seq_id):
-                    # 프레임 오프셋 적용
-                    seq_info = seq_info.copy()
-                    seq_info['frame_offset'] = frame_offset
-                    
-                    # 모션 데이터 로드
-                    motion, motion_length = self._load_motion_data_with_info(seq_info)
-                    
-                    # ManipTrans 형식으로 변환
-                    data = self._convert_to_manip_format(motion, seq_info)
-                    
-                    # 처리 및 반환
-                    return self._finalize_data(data, i, seq_info)
-                    # return data
+                frame_offset = None  # frame_offset이 지정되지 않으면 None으로 설정
             
-        
+            # scene_sequence 형식 처리 (예: "p019-makeup_063")
+            if "_" in seq_id:
+                target_scene, target_seq = seq_id.rsplit("_", 1)
+                
+                # 해당 시퀀스 찾기 - scene과 sequence 모두 일치하는지 확인
+                for i, seq_info in enumerate(self.sequence_info):
+                    if seq_info['scene'] == target_scene and seq_info['sequence_id'] == target_seq:
+                        # 프레임 오프셋 적용
+                        seq_info = seq_info.copy()
+                        seq_info['frame_offset'] = frame_offset
+                        
+                        # 모션 데이터 로드
+                        motion, motion_length = self._load_motion_data_with_info(seq_info)
+                        
+                        # ManipTrans 형식으로 변환
+                        data = self._convert_to_manip_format(motion, seq_info)
+                        
+                        # 처리 및 반환
+                        self._finalize_data(data, i, seq_info)
+                        return data  # 찾으면 즉시 반환
+            else:
+                # 기존 방식 (하위 호환성)
+                for i, seq_info in enumerate(self.sequence_info):
+                    if seq_id in seq_info['sequence_id'] or seq_info['sequence_id'].startswith(seq_id):
+                        # 프레임 오프셋 적용
+                        seq_info = seq_info.copy()
+                        seq_info['frame_offset'] = frame_offset
+                        
+                        # 모션 데이터 로드
+                        motion, motion_length = self._load_motion_data_with_info(seq_info)
+                        
+                        # ManipTrans 형식으로 변환
+                        data = self._convert_to_manip_format(motion, seq_info)
+                        
+                        # 처리 및 반환
+                        self._finalize_data(data, i, seq_info)
+                        return data  # 찾으면 즉시 반환
+            
+            # 시퀀스를 찾지 못한 경우 예외 발생시켜 건너뛰기
+            if data is None:
+                if self.verbose:
+                    cprint(f"Warning: Sequence '{seq_id}' not found, skipping...", "yellow")
+                raise KeyError(f"Sequence '{seq_id}' not found in dataset")
+                    
+        elif isinstance(index, int):
+            # 정수 인덱스 처리
+            if 0 <= index < len(self.sequence_info):
+                seq_info = self.sequence_info[index]
+                motion, motion_length = self._load_motion_data_with_info(seq_info)
+                data = self._convert_to_manip_format(motion, seq_info)
+                self._finalize_data(data, index, seq_info)
+            else:
+                if self.verbose:
+                    cprint(f"Warning: Index {index} out of range, skipping...", "yellow")
+                raise IndexError(f"Index {index} out of range for dataset with {len(self.sequence_info)} sequences")
         else:
             raise ValueError(f"Unsupported index type: {type(index)}")
-    
+            
+        return data
+
+
     def _load_motion_data_with_info(self, seq_info: Dict) -> Tuple[torch.Tensor, int]:
         """시퀀스 정보를 사용하여 모션 데이터를 로드합니다."""
         data_path = seq_info['path']
@@ -372,7 +521,7 @@ class GigaHandsDataset(BASE_CLASS):
             return torch.zeros(T, 126, device=self.device), T
         
         start, end = seq_info['chosen_frames']
-        frame_offset = seq_info.get('frame_offset', 0)
+        frame_offset = seq_info.get('frame_offset', None)
         
         # 프레임 범위 조정
         if end == -1:
@@ -380,9 +529,29 @@ class GigaHandsDataset(BASE_CLASS):
         else:
             motion = np.array(mano_kp)[start:end+1]
         
-        # 특정 프레임부터 시작하는 경우
-        if frame_offset > 0 and frame_offset < len(motion):
-            motion = motion[frame_offset:]
+        original_length = len(motion)
+        
+        # frame_offset이 지정된 경우: 해당 지점부터 시작
+        if frame_offset is not None and frame_offset > 0:
+            if frame_offset < original_length:
+                motion = motion[frame_offset:]
+            else:
+                # frame_offset이 시퀀스 길이를 벗어나면 마지막 프레임부터 시작
+                motion = motion[-1:]
+        
+        # frame_offset이 지정되지 않은 경우: 랜덤하게 시작점 선택
+        elif frame_offset is None:
+            if original_length > self.max_motion_length:
+                # 시퀀스가 max_motion_length보다 길면 랜덤한 시작점에서 max_motion_length만큼 추출
+                max_start_idx = original_length - self.max_motion_length
+                random_start = np.random.randint(0, max_start_idx + 1)
+                motion = motion[random_start:random_start + self.max_motion_length]
+                if self.verbose:
+                    cprint(f"Random sampling: start={random_start}, length={self.max_motion_length}, total={original_length}", "cyan")
+            else:
+                # 시퀀스가 max_motion_length보다 작거나 같으면 전체 시퀀스 사용
+                if self.verbose:
+                    cprint(f"Using full sequence: length={original_length}, max={self.max_motion_length}", "cyan")
         
         motion = torch.tensor(motion, dtype=torch.float32, device=self.device)
         
@@ -391,12 +560,12 @@ class GigaHandsDataset(BASE_CLASS):
         
         m_length = motion.shape[0]
         
-        # 길이 제한
+        # 길이 제한 (frame_offset=None이고 길이가 max보다 큰 경우는 이미 위에서 처리됨)
         if m_length > self.max_motion_length:
             motion = motion[:self.max_motion_length]
             m_length = self.max_motion_length
         
-        # 패딩
+        # 패딩 (시퀀스가 max_motion_length보다 짧은 경우)
         if m_length < self.max_motion_length:
             padding = torch.zeros((self.max_motion_length - m_length, motion.shape[1]), device=self.device)
             motion = torch.cat([motion, padding], dim=0)
@@ -405,16 +574,28 @@ class GigaHandsDataset(BASE_CLASS):
     
     def _finalize_data(self, data: Dict, idx: int, seq_info: Dict) -> Dict:
         """데이터 처리를 완료하고 반환합니다."""
-        # 더미 오브젝트 포인트 클라우드 (실제 객체가 없으므로)
-        rs_verts_obj = torch.randn(1000, 3, device=self.device) * 0.1  # 작은 더미 포인트 클라우드
+        # Object center 기반으로 더미 object point cloud 생성
+        obj_center_pos = data["obj_trajectory"][:, :3, 3]  # [T, 3]
+        mean_center = torch.mean(obj_center_pos, dim=0)  # [3]
+        
+        # 더미 오브젝트 포인트 클라우드 (object center 주변에 작은 구 형태)
+        rs_verts_obj = torch.randn(1000, 3, device=self.device) * 0.05 + mean_center  # object center 주변
+        
+        # OakInk2 형식에 맞게 추가 데이터 설정
+        data.update({
+            "data_path": seq_info['path'],
+            "obj_verts": rs_verts_obj,
+            "scene_objs": [],  # 빈 리스트
+            "obj_urdf_path": f"dummy_urdf_path_{seq_info['sequence_id']}.urdf"
+        })
         
         # 기본 처리 적용 (ManipData가 있는 경우에만)
-        if hasattr(self, 'process_data'):
-            try:
-                self.process_data(data, idx, rs_verts_obj)
-            except Exception as e:
-                if self.verbose:
-                    cprint(f"Warning: Failed to process data at index {idx}: {e}", "yellow")
+        # if hasattr(self, 'process_data'):
+            # try:
+        self.process_data(data, idx, rs_verts_obj)
+            # except Exception as e:
+            #     if self.verbose:
+            #         cprint(f"Warning: Failed to process data at index {idx}: {e}", "yellow")
         
         # 리타겟팅된 데이터 로드 시도
         seq_id = seq_info['sequence_id']
@@ -422,19 +603,19 @@ class GigaHandsDataset(BASE_CLASS):
             self.data_dir, 'retargeted', f"{seq_id}_retargeted.pkl"
         )
         
-        if hasattr(self, 'load_retargeted_data'):
-            self.load_retargeted_data(data, retargeted_data_path)
-        else:
-            # 기본 리타겟팅 데이터 생성
-            T = data["wrist_pos"].shape[0]
-            data.update({
-                "opt_wrist_pos": data["wrist_pos"],
-                "opt_wrist_rot": data["wrist_rot"],
-                "opt_dof_pos": torch.zeros([T, 20], device=self.device),  # 기본 DOF 수
-                "opt_wrist_velocity": torch.zeros_like(data["wrist_pos"]),
-                "opt_wrist_angular_velocity": torch.zeros_like(data["wrist_rot"]),
-                "opt_dof_velocity": torch.zeros([T, 20], device=self.device),
-            })
+        # if hasattr(self, 'load_retargeted_data'):
+        self.load_retargeted_data(data, retargeted_data_path)
+        # else:
+        #     # 기본 리타겟팅 데이터 생성
+        #     T = data["wrist_pos"].shape[0]
+        #     data.update({
+        #         "opt_wrist_pos": data["wrist_pos"],
+        #         "opt_wrist_rot": data["wrist_rot"],
+        #         "opt_dof_pos": torch.zeros([T, 20], device=self.device),  # 기본 DOF 수
+        #         "opt_wrist_velocity": torch.zeros_like(data["wrist_pos"]),
+        #         "opt_wrist_angular_velocity": torch.zeros_like(data["wrist_rot"]),
+        #         "opt_dof_velocity": torch.zeros([T, 20], device=self.device),
+        #     })
         
         return data
 

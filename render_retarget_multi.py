@@ -794,7 +794,7 @@ if __name__ == "__main__":
             },
             {"name": "--retargeted_data_path",
                 "type": str,
-                "default": "/mnt/ssd1/jisoo6687/hoi_dataset/gigahands/retargeted/mano2inspire_rh/p001-folder/keypoints_3d_mano/000_retargeted.pkl",
+                "default": "/scratch2/jisoo6687/gigahands/retargeted/mano2inspire_rh/p001-folder/keypoints_3d_mano/000_retargeted.pkl",
                 "help": "Path to retargeted data pickle file"
             },
             {"name": "--smooth",

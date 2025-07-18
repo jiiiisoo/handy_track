@@ -59,10 +59,29 @@ def pack_gigahands_data(data_item, dexhand, side="right"):
     # 손목 위치 (첫 번째 키포인트가 손목)
     wrist_pos = hand_keypoints[:, 0, :]  # [T, 3]
     
-    # GigaHands MANO 키포인트 순서 정의 (21개)
+        # 손목 회전 추정 (index finger 방향 기반)
+    # if hand_keypoints.shape[1] >= 9:  # index_tip이 있다면
+    #     # 손목에서 index tip으로의 벡터로 회전 추정
+    #     wrist_to_index = hand_keypoints[:, 8, :] - hand_keypoints[:, 0, :]  # index_tip - wrist
+    #     wrist_to_index = wrist_to_index / (torch.norm(wrist_to_index, dim=-1, keepdim=True) + 1e-8)
+        
+    #     # 기본 forward 방향 [1, 0, 0]에서 wrist_to_index로의 회전 계산
+    #     forward = torch.tensor([1.0, 0.0, 0.0], dtype=wrist_to_index.dtype, device=wrist_to_index.device).expand_as(wrist_to_index)
+        
+    #     # Cross product로 회전축 계산
+    #     rotation_axis = torch.cross(forward, wrist_to_index, dim=-1)
+    #     rotation_axis = rotation_axis / (torch.norm(rotation_axis, dim=-1, keepdim=True) + 1e-8)
+        
+    #     # Dot product로 회전각 계산
+    #     cos_angle = torch.sum(forward * wrist_to_index, dim=-1, keepdim=True)
+    #     cos_angle = torch.clamp(cos_angle, -1.0, 1.0)
+    #     angle = torch.acos(cos_angle)
+        
+    #     # Axis-angle 표현
+    #     wrist_rot = rotation_axis * angle  # [T, 3]
     
-    # with open("/mnt/ssd1/jisoo6687/hoi_dataset/gigahands/handpose/p001-folder/params/000.json", "r") as f:
-    #     params = json.load(f)
+    # GigaHands MANO 키포인트 순서 정의 (21개)
+    # params = json.load(open("/mnt/ssd1/jisoo6687/hoi_dataset/gigahands/handpose/p001-folder/params/000.json", "r"))
     # pose = torch.tensor(params["right"]["poses"], dtype=torch.float32)
     # T = pose.shape[0]
     # shape = torch.tensor(params["right"]["shapes"], dtype=torch.float32).repeat(T, 1)
@@ -74,9 +93,16 @@ def pack_gigahands_data(data_item, dexhand, side="right"):
     # )
     # with torch.no_grad():
     #     hand_verts, _, transform_abs = mano_layer(pose, shape)
-    transform_abs = torch.ones(T, 16, 4, 4)
+    # print(hand_verts.shape, hand_keypoints.shape, transform_abs.shape)
+    # print(hand_keypoints.shape)
 
-    # transform_abs = torch.load("/workspace/ManipTrans/transform_abs.pt")
+    # with torch.no_grad():
+    #     hand_verts, hand_joints, transform_abs = mano_layer(hand_keypoints, shape)
+
+    # print(hand_verts.shape, hand_joints.shape, transform_abs.shape)
+    # 1/0
+
+    transform_abs = torch.ones(T, 16, 4,4)
     keypoints = hand_keypoints.numpy()  # [21, 3]  
     wrist_pos = keypoints[:,0,:]
     middle_pos = keypoints[:,9,:]
@@ -467,6 +493,66 @@ class Mano2DexhandGigaHands:
 
         self.gym.prepare_sim(self.sim)
 
+    def analyze_ring_finger_mapping(self):
+        """Ring finger의 조인트 매핑과 DOF 관계를 분석"""
+        cprint("=== RING FINGER ANALYSIS ===", "yellow")
+        
+        # 1. Body names 분석
+        cprint("1. DexHand Body Names (관절):", "cyan")
+        ring_body_indices = []
+        for i, body_name in enumerate(self.dexhand.body_names):
+            hand_joint_name = self.dexhand.to_hand(body_name)[0]
+            if "ring" in hand_joint_name:
+                ring_body_indices.append(i)
+                cprint(f"  [{i:2d}] {body_name} -> {hand_joint_name}", "magenta")
+            else:
+                cprint(f"  [{i:2d}] {body_name} -> {hand_joint_name}", "white")
+        
+        # 2. DOF names 분석
+        cprint("\n2. DexHand DOF Names (조인트 각도):", "cyan")
+        ring_dof_indices = []
+        for i, dof_name in enumerate(self.dexhand.dof_names):
+            if "ring" in dof_name.lower() or "finger_2" in dof_name.lower():
+                ring_dof_indices.append(i)
+                cprint(f"  [{i:2d}] {dof_name} (RING FINGER)", "magenta")
+            else:
+                cprint(f"  [{i:2d}] {dof_name}", "white")
+        
+        # 3. DOF limits 분석
+        cprint("\n3. Ring Finger DOF Limits:", "cyan")
+        for i in ring_dof_indices:
+            lower = self.dexhand_dof_lower_limits[i].item()
+            upper = self.dexhand_dof_upper_limits[i].item()
+            cprint(f"  DOF[{i}] {self.dexhand.dof_names[i]}: [{lower:.3f}, {upper:.3f}]", "magenta")
+        
+        # 4. Isaac2Chain 순서 매핑
+        cprint(f"\n4. Isaac2Chain Order Mapping:", "cyan")
+        cprint(f"  Isaac order: {list(range(len(self.isaac2chain_order)))}", "white")
+        cprint(f"  Chain order: {self.isaac2chain_order}", "white")
+        
+        # 5. MANO 키포인트 구조 확인
+        cprint(f"\n5. MANO Keypoint Structure:", "cyan")
+        mano_joints = [
+            "wrist", "thumb_proximal", "thumb_intermediate", "thumb_distal", "thumb_tip",
+            "index_proximal", "index_intermediate", "index_distal", "index_tip",
+            "middle_proximal", "middle_intermediate", "middle_distal", "middle_tip",
+            "ring_proximal", "ring_intermediate", "ring_distal", "ring_tip",
+            "pinky_proximal", "pinky_intermediate", "pinky_distal", "pinky_tip"
+        ]
+        
+        for i, joint_name in enumerate(mano_joints):
+            if "ring" in joint_name:
+                cprint(f"  [{i:2d}] {joint_name} (TARGET)", "magenta")
+            else:
+                cprint(f"  [{i:2d}] {joint_name}", "white")
+        
+        return {
+            "ring_body_indices": ring_body_indices,
+            "ring_dof_indices": ring_dof_indices,
+            "total_bodies": len(self.dexhand.body_names),
+            "total_dofs": len(self.dexhand.dof_names)
+        }
+
     def fitting(self, max_iter, target_wrist_pos, target_wrist_rot, target_mano_joints):
         """MANO 키포인트를 로봇 손으로 retargeting"""
         
@@ -476,12 +562,10 @@ class Mano2DexhandGigaHands:
         target_wrist_pos = (self.mujoco2gym_transf[:3, :3] @ target_wrist_pos.T).T + self.mujoco2gym_transf[:3, 3]
         target_wrist_rot = self.mujoco2gym_transf[:3, :3] @ aa_to_rotmat(target_wrist_rot)
         # STEP 1: MANO joint를 로컬에서 월드 좌표계로 변환
-        # print(target_wrist_rot.shape, target_mano_joints.shape)
-        # # 배치 행렬 곱셈: [B, 3, 3] @ [B, 3, N] = [B, 3, N]
-        # target_mano_joints = torch.bmm(
-        #     target_wrist_rot, 
-        #     target_mano_joints.transpose(-2, -1)
-        # ).transpose(-2, -1) + target_wrist_pos[:, None]
+        # target_mano_joints = target_mano_joints.view(self.num_envs, -1, 3)
+        # target_mano_joints = (target_wrist_rot @ target_mano_joints.transpose(-1, -2)).transpose(
+        #     -1, -2
+        # ) + target_wrist_pos[:, None]
 
         # # STEP 2: mujoco2gym 좌표계로 변환
         target_mano_joints = target_mano_joints.view(-1, 3)
@@ -513,14 +597,35 @@ class Mano2DexhandGigaHands:
         )
         
         # Adam optimizer supports parameter groups with different learning rates
-        # Alternative: Use LBFGS with single learning rate (uncomment below and comment out Adam)
-        # opti = torch.optim.LBFGS([opt_wrist_pos, opt_wrist_rot, opt_dof_pos], lr=0.0005)
-        # Alternative: Use Adam with parameter groups (uncomment below and comment out LBFGS)
-        # opti = torch.optim.Adam(
-        #     [{"params": [opt_wrist_pos, opt_wrist_rot], "lr": 0.0008}, {"params": [opt_dof_pos], "lr": 0.0004}]
-        # )
+        opti = torch.optim.Adam(
+            [{"params": [opt_dof_pos], "lr": 0.001}, {"params": [opt_wrist_pos, opt_wrist_rot], "lr": 0.002}]  # learning rate 조정
+        )
 
         # 손가락별 가중치 설정
+        # weight = []
+        # for k in self.dexhand.body_names:
+        #     k = self.dexhand.to_hand(k)[0]
+        #     if "tip" in k:
+        #         if "index" in k:
+        #             weight.append(20)
+        #         elif "middle" in k:
+        #             weight.append(10)
+        #         elif "ring" in k:
+        #             weight.append(20)
+        #         elif "pinky" in k:
+        #             weight.append(10)
+        #         elif "thumb" in k:
+        #             weight.append(25)
+        #         else:
+        #             weight.append(1)
+        #     elif "proximal" in k:
+        #         weight.append(1)
+        #     elif "intermediate" in k:
+        #         weight.append(1)
+        #     else:
+        #         weight.append(1)
+        # weight = torch.tensor(weight, device=self.sim_device, dtype=torch.float32)
+
         weight = []
         for k in self.dexhand.body_names:
             k = self.dexhand.to_hand(k)[0]
@@ -528,19 +633,21 @@ class Mano2DexhandGigaHands:
                 if "index" in k:
                     weight.append(20)
                 elif "middle" in k:
-                    weight.append(10)
+                    weight.append(20)
                 elif "ring" in k:
-                    weight.append(10)
+                    weight.append(30)
                 elif "pinky" in k:
-                    weight.append(10)
+                    weight.append(20)
                 elif "thumb" in k:
-                    weight.append(25)
+                    weight.append(30)
                 else:
                     weight.append(1)
             elif "proximal" in k:
                 weight.append(5)
             elif "intermediate" in k:
                 weight.append(5)
+            elif "wrist" in k:
+                weight.append(25)
             else:
                 weight.append(1)
         weight = torch.tensor(weight, device=self.sim_device, dtype=torch.float32)
@@ -562,7 +669,7 @@ class Mano2DexhandGigaHands:
             self._root_state[:, 0, 7:] = torch.zeros_like(self._root_state[:, 0, 7:])
 
             opt_dof_pos_clamped = torch.clamp(opt_dof_pos, self.dexhand_dof_lower_limits, self.dexhand_dof_upper_limits)
-            
+            # opt_dof_pos_clamped = opt_dof_pos
             # 디버깅: clamp 효과 확인
             if iter % 200 == 0:
                 clamped_count = ((opt_dof_pos <= self.dexhand_dof_lower_limits + 1e-6) | 
@@ -594,13 +701,13 @@ class Mano2DexhandGigaHands:
                 [self._rigid_body_state[:, self.dexhand_handles[k], :3] for k in self.dexhand.body_names],
                 dim=1,
             )
-            with torch.no_grad():
+            # with torch.no_grad():
 
-                ret = self.chain.forward_kinematics(opt_dof_pos_clamped[:, self.isaac2chain_order])
-                pk_joints = torch.stack([ret[k].get_matrix()[:, :3, 3] for k in self.dexhand.body_names], dim=1)
-                pk_joints = (rot6d_to_rotmat(opt_wrist_rot) @ pk_joints.transpose(-1, -2)).transpose(
-                    -1, -2
-                ) + opt_wrist_pos[:, None]
+            #     ret = self.chain.forward_kinematics(opt_dof_pos_clamped[:, self.isaac2chain_order])
+            #     pk_joints = torch.stack([ret[k].get_matrix()[:, :3, 3] for k in self.dexhand.body_names], dim=1)
+            #     pk_joints = (rot6d_to_rotmat(opt_wrist_rot) @ pk_joints.transpose(-1, -2)).transpose(
+            #         -1, -2
+            #     ) + opt_wrist_pos[:, None]
 
             target_joints = torch.cat([target_wrist_pos[:, None], target_mano_joints], dim=1)
             
@@ -608,119 +715,59 @@ class Mano2DexhandGigaHands:
             for k in range(len(self.mano_joint_points)):
                 self.mano_joint_points[k][:, :3] = target_joints[:, k]
             
-            # For LBFGS: create contiguous copies, optimize, then copy back
-            # Store original tensors for simulation
-            orig_opt_wrist_pos = opt_wrist_pos
-            orig_opt_wrist_rot = opt_wrist_rot  
-            orig_opt_dof_pos = opt_dof_pos
+            # Adam optimization
+            opti.zero_grad()
             
-            # Create contiguous copies for LBFGS
-            opt_wrist_pos_contig = opt_wrist_pos.detach().clone().contiguous().requires_grad_(True)
-            opt_wrist_rot_contig = opt_wrist_rot.detach().clone().contiguous().requires_grad_(True)
-            opt_dof_pos_contig = opt_dof_pos.detach().clone().contiguous().requires_grad_(True)
+            # Forward kinematics calculation
+            # opt_dof_pos_clamped_local = torch.clamp(opt_dof_pos, self.dexhand_dof_lower_limits, self.dexhand_dof_upper_limits)
+            ret = self.chain.forward_kinematics(opt_dof_pos_clamped[:, self.isaac2chain_order])
+            pk_joints = torch.stack([ret[k].get_matrix()[:, :3, 3] for k in self.dexhand.body_names], dim=1)
+            pk_joints = (rot6d_to_rotmat(opt_wrist_rot) @ pk_joints.transpose(-1, -2)).transpose(
+                -1, -2
+            ) + opt_wrist_pos[:, None]
             
-            # Create optimizer with contiguous tensors
-            opti_contig = torch.optim.LBFGS([opt_dof_pos_contig, opt_wrist_pos_contig, opt_wrist_rot_contig], lr=0.05)
+            # Loss calculation with weighted joint and proper rotation errors
+            joint_errors = torch.norm(pk_joints - target_joints, dim=-1)  # [B, N_joints]
+            joint_loss = torch.mean(joint_errors * weight[None]) * 1.0
             
-            # Alternative: Use Adam with balanced learning rates (uncomment to test)
-            # opti_contig = torch.optim.Adam([
-            #     {"params": [opt_dof_pos_contig], "lr": 0.001},      # Higher lr for small gradients
-            #     {"params": [opt_wrist_pos_contig], "lr": 0.0003},   # Lower lr for large gradients  
-            #     {"params": [opt_wrist_rot_contig], "lr": 0.0005}
-            # ])
+            # Proper rotation loss: compare rotation matrices instead of positions  
+            # target_wrist_rotmat = torch.tensor(target_wrist_rot, device=self.sim_device, dtype=torch.float32)
+            # opt_wrist_rotmat = rot6d_to_rotmat(opt_wrist_rot)
+            # rotation_error = torch.norm(opt_wrist_rotmat - target_wrist_rot)
+            # rotation_loss = torch.mean(rotation_error) * 0.1  # Much reduced weight for rotation
             
-            # LBFGS requires a closure function
-            def closure():
-                opti_contig.zero_grad()
-                
-                # Forward kinematics calculation inside closure
-                opt_dof_pos_clamped_local = torch.clamp(opt_dof_pos_contig, self.dexhand_dof_lower_limits, self.dexhand_dof_upper_limits)
-                ret = self.chain.forward_kinematics(opt_dof_pos_clamped_local[:, self.isaac2chain_order])
-                pk_joints = torch.stack([ret[k].get_matrix()[:, :3, 3] for k in self.dexhand.body_names], dim=1)
-                pk_joints = (rot6d_to_rotmat(opt_wrist_rot_contig) @ pk_joints.transpose(-1, -2)).transpose(
-                    -1, -2
-                ) + opt_wrist_pos_contig[:, None]
-                
-                # loss = torch.mean(torch.norm(pk_joints - target_joints, dim=-1) * weight[None])
-                # loss.backward()
-                
-                # Alternative: Weight rotation errors more heavily (uncomment to test)
-                joint_errors = torch.norm(pk_joints - target_joints, dim=-1)  # [B, N_joints]
-                rotation_error = torch.norm(pk_joints[:, 0] - target_joints[:, 0], dim=-1)  # wrist joint error
-                joint_loss = torch.mean(joint_errors * weight[None]) * 10.0
-                rotation_loss = torch.mean(rotation_error) * 2.0  # 3x weight for wrist rotation
-                loss = joint_loss + rotation_loss
-                loss.backward()
-                
-                # Gradient balancing to prevent wrist_pos from dominating
-                # if opt_dof_pos_contig.grad is not None and opt_wrist_pos_contig.grad is not None and opt_wrist_rot_contig.grad is not None:
-                #     # Calculate gradient norms
-                #     dof_grad_norm = opt_dof_pos_contig.grad.norm()
-                #     pos_grad_norm = opt_wrist_pos_contig.grad.norm()
-                #     rot_grad_norm = opt_wrist_rot_contig.grad.norm()
-                    
-                #     # Prevent division by zero
-                #     if dof_grad_norm > 1e-8 and pos_grad_norm > 1e-8 and rot_grad_norm > 1e-8:
-                #         # Target norm (use average or set manually)
-                #         target_norm = (dof_grad_norm + pos_grad_norm + rot_grad_norm) / 3.0
-                        
-                #         # Scale gradients to target norm
-                #         opt_dof_pos_contig.grad *= (target_norm / dof_grad_norm)
-                #         opt_wrist_pos_contig.grad *= (target_norm / pos_grad_norm)  # Reduce wrist pos influence
-                #         opt_wrist_rot_contig.grad *= (target_norm / rot_grad_norm)  # Boost wrist rotation importance
-                
-                return loss
+            loss = joint_loss
+            loss.backward()
             
-            # LBFGS step with closure
-            loss = opti_contig.step(closure)
+            # Gradient clipping to prevent explosion
+            # torch.nn.utils.clip_grad_norm_([opt_wrist_pos], max_norm=1.0)
+            torch.nn.utils.clip_grad_norm_([opt_wrist_rot], max_norm=1.0)
+            torch.nn.utils.clip_grad_norm_([opt_dof_pos], max_norm=1.0)
             
-            # Alternative: Simple Adam optimization (uncomment if using Adam above)
-            # opti_contig.zero_grad()
-            # opt_dof_pos_clamped_local = torch.clamp(opt_dof_pos_contig, self.dexhand_dof_lower_limits, self.dexhand_dof_upper_limits)
-            # ret = self.chain.forward_kinematics(opt_dof_pos_clamped_local[:, self.isaac2chain_order])
-            # pk_joints = torch.stack([ret[k].get_matrix()[:, :3, 3] for k in self.dexhand.body_names], dim=1)
-            # pk_joints = (rot6d_to_rotmat(opt_wrist_rot_contig) @ pk_joints.transpose(-1, -2)).transpose(-1, -2) + opt_wrist_pos_contig[:, None]
-            # loss = torch.mean(torch.norm(pk_joints - target_joints, dim=-1) * weight[None])
-            # loss.backward()
-            # opti_contig.step()
+            # Adam optimization step
+            opti.step()
+            
+            # Store loss values for logging
+            loss_value = loss.item()
+            joint_loss_val = joint_loss.item()
+            # rotation_loss_val = rotation_loss.item()
 
-            # For debugging/logging, recalculate loss value if needed
-            if isinstance(loss, torch.Tensor):
-                loss_value = loss.item()
-            else:
-                loss_value = float(loss)
+            if iter == 7000 :
+                break
             
-            # Print gradient info before copying back
+            # Print gradient info
             if iter % 100 == 0:
-                # Gradient 정보 출력 (contiguous 텐서에서 가져옴)
-                dof_grad_norm = opt_dof_pos_contig.grad.norm().item() if opt_dof_pos_contig.grad is not None else 0.0
-                wrist_pos_grad_norm = opt_wrist_pos_contig.grad.norm().item() if opt_wrist_pos_contig.grad is not None else 0.0
-                wrist_rot_grad_norm = opt_wrist_rot_contig.grad.norm().item() if opt_wrist_rot_contig.grad is not None else 0.0
+                dof_grad_norm = opt_dof_pos.grad.norm().item() if opt_dof_pos.grad is not None else 0.0
+                wrist_pos_grad_norm = opt_wrist_pos.grad.norm().item() if opt_wrist_pos.grad is not None else 0.0
+                wrist_rot_grad_norm = opt_wrist_rot.grad.norm().item() if opt_wrist_rot.grad is not None else 0.0
                 
-                cprint(f"{iter} loss:{loss_value:.6f} grad[dof:{dof_grad_norm:.4f}, pos:{wrist_pos_grad_norm:.4f}, rot:{wrist_rot_grad_norm:.4f}]", "green")
-                if iter == 400 :
-                    break
+                cprint(f"{iter} loss:{loss_value:.6f} [joint:{joint_loss_val:.4f}] grad[dof:{dof_grad_norm:.4f}, pos:{wrist_pos_grad_norm:.4f}, rot:{wrist_rot_grad_norm:.4f}]", "green")
                 if iter > 500:  # 최소 500번 실행 후 수렴 체크
                     loss_diff = past_loss - loss_value
                     if loss_diff < 1e-4:  # 수렴 조건 완화
                         cprint(f"Converged at iteration {iter} (loss diff: {loss_diff:.2e})", "cyan")
                         break
                 past_loss = loss_value
-            
-            # Copy optimized values back to original tensors (maintaining simulation references)
-            # with torch.no_grad():
-            #     orig_opt_wrist_pos.copy_(opt_wrist_pos_contig)
-            #     orig_opt_wrist_rot.copy_(opt_wrist_rot_contig)
-            #     orig_opt_dof_pos.copy_(opt_dof_pos_contig)
-            
-            # Update references for next iteration
-            # opt_wrist_pos = orig_opt_wrist_pos
-            # opt_wrist_rot = orig_opt_wrist_rot
-            # opt_dof_pos = orig_opt_dof_pos
-            opt_wrist_pos = opt_wrist_pos_contig
-            opt_wrist_rot = opt_wrist_rot_contig
-            opt_dof_pos = opt_dof_pos_contig
-            # print(opt_dof_pos[0])
             
             # 매우 작은 loss에서 조기 종료
             if iter % 50 == 0 and loss_value < 1e-3:
@@ -826,26 +873,31 @@ if __name__ == "__main__":
         # ManipTrans 형식으로 변환 (원본과 동일한 방식)
         demo_data = pack_gigahands_data(motion_data, dexhand, parser.side)
         
+        # ❗ CRITICAL: num_envs를 Isaac Gym 초기화 전에 설정
+        parser.num_envs = demo_data["mano_joints"]["wrist"].shape[0]
+        cprint(f"Number of environments: {parser.num_envs}", "blue")
+        
         # 텐서들을 GPU로 이동 (device 일치)
         device = "cuda:0" if torch.cuda.is_available() else "cpu"
         demo_data["wrist_pos"] = demo_data["wrist_pos"].to(device)
         demo_data["wrist_rot"] = demo_data["wrist_rot"].to(device)
         for joint_name in demo_data["mano_joints"]:
             demo_data["mano_joints"][joint_name] = demo_data["mano_joints"][joint_name].to(device)
-        
-        parser.num_envs = demo_data["mano_joints"]["wrist"].shape[0]
-        
-        cprint(f"Number of environments: {parser.num_envs}", "blue")
 
-        # MANO to Dexhand 변환
-        mano2inspire = Mano2DexhandGigaHands(parser, dexhand)
-        
         # MANO 조인트를 하나의 텐서로 결합 (원본 mano2dexhand.py와 동일한 방식)
         mano_joints_tensor = torch.cat([
             demo_data["mano_joints"][dexhand.to_hand(j_name)[0]]
             for j_name in dexhand.body_names
             if dexhand.to_hand(j_name)[0] != "wrist"
         ], dim=-1)
+
+        # MANO to Dexhand 변환 - 매번 새로운 객체 생성
+        mano2inspire = Mano2DexhandGigaHands(parser, dexhand)
+        
+        # Ring finger 매핑 분석 (디버깅용 - 첫 번째만)
+        if parser.data_idx != "all":  # single sequence mode
+            ring_analysis = mano2inspire.analyze_ring_finger_mapping()
+            cprint(f"Ring finger analysis: {ring_analysis}", "blue")
 
         to_dump = mano2inspire.fitting(
             parser.iter,
@@ -916,23 +968,18 @@ if __name__ == "__main__":
                 dump_dir = f"{parser.save_dir}/mano2{str(dexhand)}"
             os.makedirs(dump_dir, exist_ok=True)
             dump_path = os.path.join(dump_dir, f"{sequence_id}_retargeted.pkl")
+            # if i == 0 :
+            #     continue
             
             # 이미 처리된 파일 스킵
             if parser.skip_existing and os.path.exists(dump_path):
                 cprint(f"  Skipping (already exists): {dump_path}", "yellow")
                 skipped_count += 1
                 continue
-            
-            # try:
-            # 개별 시퀀스 처리
             run(parser, seq_id)
             processed_count += 1
             cprint(f"  ✓ Successfully processed: {seq_id}", "green")
                 
-            # except Exception as e:
-            #     cprint(f"  ✗ Error processing {seq_id}: {str(e)}", "red")
-            #     error_count += 1
-            #     continue
         
         # 최종 결과 출력
         cprint(f"\n=== Batch Processing Complete ===", "cyan")

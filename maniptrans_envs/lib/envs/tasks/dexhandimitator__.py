@@ -222,103 +222,21 @@ class DexHandImitatorRHEnv(VecTask):
         mujoco2gym_transf[:3, 3] = np.array([0, 0, self._table_surface_z])
         self.mujoco2gym_transf = torch.tensor(mujoco2gym_transf, device=self.sim_device, dtype=torch.float32)
 
-        # data_type 설정 확인
-        config_data_type = self.cfg["env"].get("data_type", "auto")
-        print(f"Config data_type: {config_data_type}")
+        # 단일 데이터셋만 사용
+        # first_idx = self.dataIndices[0]
+        first_idx = 'p001-folder_000'
+        dataset_type = ManipDataFactory.dataset_type(first_idx)
         
-        # dataIndices가 빈 리스트이고 명시적 data_type이 지정된 경우, 모든 인덱스를 자동 생성
-        if len(self.dataIndices) == 0 and config_data_type != "auto":
-            print(f"Empty dataIndices with explicit data_type={config_data_type}, generating available indices...")
-            if config_data_type == "gigahands":
-                # GigaHands 데이터셋의 모든 시퀀스 인덱스 생성 (메모리 효율적)
-                import json
-                import random
-                gigahands_dir = self.cfg["env"].get("gigahands_data_dir", "/scratch2/jisoo6687/gigahands/handpose")
-                annotations_file = os.path.join(gigahands_dir, "../annotations_v2.jsonl")
-                
-                all_indices = []
-                with open(annotations_file, 'r', encoding='utf-8') as file:
-                    for i, line in enumerate(file):
-                        line = line.strip()
-                        if line:
-                            script_info = json.loads(line)
-                            scene = script_info['scene']
-                            seq = script_info['sequence'][0] if isinstance(script_info['sequence'], list) else script_info['sequence']
-                            script_text = script_info['clarify_annotation']
-                            
-                            # 유효한 시퀀스만 추가 (Buggy나 None 제외)
-                            if script_text != 'None' and script_text != 'Buggy':
-                                seq_path = os.path.join(gigahands_dir, scene, 'keypoints_3d_mano', seq + '.json')
-                                if os.path.exists(seq_path):
-                                    # 고유 식별자 생성: scene_sequence 형태로 중복 방지
-                                    unique_id = f"{scene}_{seq}"
-                                    all_indices.append(unique_id)
-                
-                # 사용할 시퀀스 수 결정 (환경 변수로 조절 가능)
-                max_sequences = self.cfg["env"].get("max_gigahands_sequences", len(all_indices))
-                
-                if max_sequences >= len(all_indices):
-                    # 모든 시퀀스 사용
-                    self.dataIndices = all_indices
-                    print(f"Generated {len(self.dataIndices)} GigaHands indices for validation")
-                else:
-                    # 랜덤 샘플링으로 지정된 수만큼 사용
-                    self.dataIndices = random.sample(all_indices, max_sequences)
-                    print(f"Generated {len(self.dataIndices)} randomly sampled GigaHands indices for validation")
-        
-        if config_data_type != "auto":
-            # 명시적 data_type이 지정된 경우 해당 타입만 사용
-            dataset_list = [config_data_type]
-            print(f"Using explicit data_type: {config_data_type}")
-        else:
-            # 기존 방식: dataIndices에서 자동 감지
-            dataset_list = list(set([ManipDataFactory.dataset_type(data_idx) for data_idx in self.dataIndices]))
-            print(f"Auto-detected dataset types: {dataset_list}")
-
         self.demo_dataset_dict = {}
-        for dataset_type in dataset_list:
-            create_kwargs = {
-                "manipdata_type": dataset_type,
-                "side": self.side,
-                "device": self.sim_device,
-                "mujoco2gym_transf": self.mujoco2gym_transf,
-                "max_seq_len": self.max_episode_length,
-                "dexhand": self.dexhand,
-                "embodiment": self.cfg["env"]["dexhand"],
-                "data_indices": self.dataIndices,
-            }
-            
-            # 명시적 data_type이 지정된 경우 추가
-            if config_data_type != "auto":
-                create_kwargs["data_type"] = config_data_type
-            
-            # 데이터셋별 특수 설정
-            if dataset_type == "gigahands" or config_data_type == "gigahands":
-                gigahands_dir = self.cfg["env"].get("gigahands_data_dir", "/scratch2/jisoo6687/gigahands/handpose")
-                create_kwargs["data_dir"] = gigahands_dir
-                print(f"DEBUG: Setting gigahands data_dir to: {create_kwargs['data_dir']}")
-            
-            print(f"Creating dataset with kwargs: {create_kwargs}")
-            self.demo_dataset_dict[dataset_type] = ManipDataFactory.create_data(**create_kwargs)
-
-        # 데이터셋 생성 후 유효성 검증
-        if config_data_type == "gigahands" and len(self.dataIndices) > 0:
-            print(f"Validating {len(self.dataIndices)} GigaHands sequences...")
-            valid_indices = []
-            
-            for idx in tqdm(self.dataIndices, desc="Validating sequences"):
-                # 실제로 데이터 로드 시도
-                dataset_type = ManipDataFactory.dataset_type(idx)
-                test_data = self.demo_dataset_dict[dataset_type][idx]
-                valid_indices.append(idx)
-            
-            # 유효한 시퀀스만 사용
-            original_count = len(self.dataIndices)
-            self.dataIndices = valid_indices
-            print(f"Validation complete: {len(valid_indices)}/{original_count} sequences are valid")
-            
-            if len(valid_indices) == 0:
-                raise ValueError("No valid GigaHands sequences found! Please check your data directory.")
+        self.demo_dataset_dict[dataset_type] = ManipDataFactory.create_data(
+            manipdata_type=dataset_type,
+            side=self.side,
+            device=self.sim_device,
+            mujoco2gym_transf=self.mujoco2gym_transf,
+            max_seq_len=self.max_episode_length,
+            dexhand=self.dexhand,
+            embodiment=self.cfg["env"]["dexhand"],
+        )
 
         # load dexhand asset
         dexhand_asset_file = self.dexhand.urdf_path
@@ -399,47 +317,13 @@ class DexHandImitatorRHEnv(VecTask):
 
         assert len(self.dataIndices) == 1 or not self.rollout_state_init, "rollout_state_init only works with one data"
 
-        # 동적 로딩을 위한 시퀀스 인덱스 저장
-        self.available_indices = self.dataIndices.copy()
-        self.sequence_counter = 0  # 전체 시퀀스 순환을 위한 카운터
+                # 간단한 데이터 로딩 - 첫 번째 시퀀스만 사용
+        first_idx = self.dataIndices[0]
+        dataset_type = ManipDataFactory.dataset_type(first_idx)
+        sample_data = self.demo_dataset_dict[dataset_type][first_idx]
         
-        # 데이터셋 타입 리스트 (ManipDataFactory에서 필요)
-        dataset_list = list(set([ManipDataFactory.dataset_type(data_idx) for data_idx in self.dataIndices]))
-        
-        print(f"Dynamic loading enabled with {len(self.available_indices)} total sequences")
-        print(f"Each epoch will cycle through different sequences for maximum data utilization")
-        
-        # 초기 데이터 로딩 (첫 번째 배치) - 예외 처리로 유효한 시퀀스만 로드
-        def segment_data(k):
-            max_attempts = len(self.available_indices)  # 최대 시도 횟수
-            for attempt in range(max_attempts):
-                try:
-                    # 순환하면서 모든 시퀀스를 사용하도록 함
-                    idx = self.available_indices[(k + attempt) % len(self.available_indices)]
-                    return self.demo_dataset_dict[ManipDataFactory.dataset_type(idx)][idx]
-                except (KeyError, IndexError, FileNotFoundError) as e:
-                    if attempt < max_attempts - 1:  # 마지막 시도가 아니면 다음 시퀀스 시도
-                        print(f"Skipping invalid sequence {self.available_indices[(k + attempt) % len(self.available_indices)]}: {e}")
-                        continue
-            
-        def create_demo_data_safely():
-            """예외 처리와 함께 데모 데이터를 생성합니다."""
-            demo_data_list = []
-            valid_count = 0
-            
-            for i in tqdm(range(self.num_envs), desc="Loading demo data"):
-                try:
-                    data = segment_data(i)
-                    demo_data_list.append(data)
-                    valid_count += 1
-                except Exception as e:
-                    print(f"Failed to load data for environment {i}: {e}")
-                    demo_data_list.append(demo_data_list[0])
-            
-            print(f"Successfully loaded {valid_count}/{self.num_envs} sequences")
-            return demo_data_list
-
-        self.demo_data = create_demo_data_safely()
+        # 모든 환경에 동일한 데이터 사용
+        self.demo_data = [sample_data for _ in range(self.num_envs)]
         self.demo_data = self.pack_data(self.demo_data)
 
         # Create environments
@@ -571,6 +455,14 @@ class DexHandImitatorRHEnv(VecTask):
         ).view(self.num_envs, -1)
 
     def pack_data(self, data):
+        # None 체크 추가
+        valid_data = [d for d in data if d is not None]
+        if len(valid_data) == 0:
+            raise ValueError("No valid data found in demo_data")
+        
+        # 모든 데이터가 유효한지 확인
+        data = valid_data
+        
         packed_data = {}
         packed_data["seq_len"] = torch.tensor([len(d["obj_trajectory"]) for d in data], device=self.device)
         max_len = packed_data["seq_len"].max()
@@ -597,7 +489,7 @@ class DexHandImitatorRHEnv(VecTask):
                 mano_joints = []
                 for d in data:
                     mano_joints.append(
-                        torch.cat(
+                        torch.concat(
                             [
                                 d[k][self.dexhand.to_hand(j_name)[0]]
                                 for j_name in self.dexhand.body_names
@@ -610,8 +502,6 @@ class DexHandImitatorRHEnv(VecTask):
             elif type(data[0][k]) == torch.Tensor:
                 stack_data = [d[k] for d in data]
                 if k != "obj_verts":
-                    print(f'stack_data shape: {stack_data[0].shape}')
-                    print(f'k: {k}')
                     packed_data[k] = fill_data(stack_data)
                 else:
                     packed_data[k] = torch.stack(stack_data).squeeze()
@@ -871,55 +761,7 @@ class DexHandImitatorRHEnv(VecTask):
                 self.dump_fileds[prop_name][:] = self.states[prop_name][:]
         return self.obs_dict
 
-    def _load_new_sequences_for_envs(self, env_ids, new_sequence_indices):
-        """특정 환경들에 새로운 시퀀스를 동적으로 로드"""
-        if not hasattr(self, 'available_indices'):
-            return
-            
-        # 각 환경에 새로운 시퀀스 데이터 할당
-        for i, env_id in enumerate(env_ids):
-            seq_pool_idx = new_sequence_indices[i]
-            actual_seq_idx = self.available_indices[seq_pool_idx]
-            
-            try:
-                # 해당 시퀀스의 데이터를 데이터셋에서 로드
-                dataset_type = ManipDataFactory.dataset_type(actual_seq_idx)
-                new_seq_data = self.demo_dataset_dict[dataset_type][actual_seq_idx]
-                
-                # demo_data의 해당 환경 인덱스에 새 데이터 할당 (이미 처리된 데이터를 단순 교체)
-                for key in new_seq_data.keys():
-                    if key in self.demo_data and torch.is_tensor(new_seq_data[key]):
-                        self.demo_data[key][env_id] = new_seq_data[key]
-                        
-            except Exception as e:
-                print(f"Failed to load sequence {actual_seq_idx} for env {env_id}: {e}, keeping existing data")
-                continue  # 기존 데이터 유지하고 다음 환경으로
-
     def _reset_default(self, env_ids):
-        # === 디버깅: Reset 원인 분석 ===
-        # if len(env_ids) > 10:  # 너무 많은 환경이 한번에 reset되는 경우
-        #     print(f"WARNING: Large number of environments resetting: {len(env_ids)}")
-        #     # reset_buf의 원인 분석
-        #     success_count = self.success_buf[env_ids].sum().item()
-        #     failure_count = self.failure_buf[env_ids].sum().item()
-            # print(f"Success: {success_count}, Failure: {failure_count}, Total: {len(env_ids)}")
-            
-        # === 동적 시퀀스 할당 시스템 ===
-        # Reset되는 환경들에 새로운 시퀀스를 할당
-        if hasattr(self, 'available_indices') and len(self.available_indices) > 1:
-            # 전체 시퀀스를 순환하면서 할당
-            new_sequence_indices = []
-            for _ in range(len(env_ids)):
-                seq_idx_in_pool = self.sequence_counter % len(self.available_indices)
-                new_sequence_indices.append(seq_idx_in_pool)
-                self.sequence_counter += 1
-            
-            # 새로운 시퀀스 데이터를 동적으로 로드
-            self._load_new_sequences_for_envs(env_ids, new_sequence_indices)
-            # if len(env_ids) <= 10:  # 적은 수만 출력
-            #     print(f"Dynamically assigned new sequences to {len(env_ids)} environments (counter: {self.sequence_counter})")
-        
-        # 기존 시퀀스 인덱스 선택 로직
         if self.random_state_init:
             seq_idx = torch.floor(
                 self.demo_data["seq_len"][env_ids] * 0.99 * torch.rand_like(self.demo_data["seq_len"][env_ids].float())
@@ -965,7 +807,7 @@ class DexHandImitatorRHEnv(VecTask):
         opt_wrist_ang_vel = self.demo_data["wrist_angular_velocity"][env_ids, seq_idx]
         opt_wrist_ang_vel = opt_wrist_ang_vel + torch.randn_like(opt_wrist_ang_vel) * 0.01
 
-        opt_hand_pose_vel = torch.cat([opt_wrist_pos, opt_wrist_rot, opt_wrist_vel, opt_wrist_ang_vel], dim=-1)
+        opt_hand_pose_vel = torch.concat([opt_wrist_pos, opt_wrist_rot, opt_wrist_vel, opt_wrist_ang_vel], dim=-1)
 
         self._base_state[env_ids, :] = opt_hand_pose_vel
 
@@ -1053,7 +895,7 @@ class DexHandImitatorRHEnv(VecTask):
             cur_mano_joint_pos = self.demo_data["mano_joints"][torch.arange(self.num_envs), cur_idx].reshape(
                 self.num_envs, -1, 3
             )
-            cur_mano_joint_pos = torch.cat([cur_wrist_pos[:, None], cur_mano_joint_pos], dim=1)
+            cur_mano_joint_pos = torch.concat([cur_wrist_pos[:, None], cur_mano_joint_pos], dim=1)
 
             for k in range(len(self.mano_joint_points)):
                 self.mano_joint_points[k][:, :3] = cur_mano_joint_pos[:, k]
@@ -1309,18 +1151,17 @@ def compute_imitation_reward(
         | (torch.abs(current_dof_vel).mean(-1) > 200)
     )  # sanity check
 
-    # GigaHands 데이터를 위해 실패 조건을 완화 (임계값을 2배로 증가)
     failed_execute = (
         (
-            (diff_thumb_tip_pos_dist > 0.08 / 0.7 * scale_factor)  # 0.04 -> 0.08
-            | (diff_index_tip_pos_dist > 0.09 / 0.7 * scale_factor)  # 0.045 -> 0.09
-            | (diff_middle_tip_pos_dist > 0.10 / 0.7 * scale_factor)  # 0.05 -> 0.10
-            | (diff_pinky_tip_pos_dist > 0.12 / 0.7 * scale_factor)  # 0.06 -> 0.12
-            | (diff_ring_tip_pos_dist > 0.12 / 0.7 * scale_factor)  # 0.06 -> 0.12
-            | (diff_level_1_pos_dist > 0.14 / 0.7 * scale_factor)  # 0.07 -> 0.14
-            | (diff_level_2_pos_dist > 0.16 / 0.7 * scale_factor)  # 0.08 -> 0.16
+            (diff_thumb_tip_pos_dist > 0.04 / 0.7 * scale_factor)
+            | (diff_index_tip_pos_dist > 0.045 / 0.7 * scale_factor)
+            | (diff_middle_tip_pos_dist > 0.05 / 0.7 * scale_factor)
+            | (diff_pinky_tip_pos_dist > 0.06 / 0.7 * scale_factor)
+            | (diff_ring_tip_pos_dist > 0.06 / 0.7 * scale_factor)
+            | (diff_level_1_pos_dist > 0.07 / 0.7 * scale_factor)
+            | (diff_level_2_pos_dist > 0.08 / 0.7 * scale_factor)
         )
-        & (running_progress_buf >= 30)  # 20 -> 30 스텝으로 증가
+        & (running_progress_buf >= 20)
     ) | error_buf
     reward_execute = (
         0.1 * reward_eef_pos

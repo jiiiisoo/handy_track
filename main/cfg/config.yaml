@@ -28,7 +28,10 @@ actionsMovingAverage: 1.0
 
 usePIDControl: False
 
-dataIndices: [7]
+dataIndices: []
+data_type: "gigahands"  # "auto", "gigahands", "oakink2", "grabdemo", etc.
+gigahands_data_dir: "/scratch2/jisoo6687/gigahands/handpose"
+max_gigahands_sequences: 999999  # 모든 시퀀스 사용하려면 큰 값, 메모리 절약하려면 작은 값
 
 # seed - set to -1 to choose random seed
 seed: 42
@@ -72,12 +75,12 @@ sigma: ''
 # set to True to use multi-gpu training
 multi_gpu: False
 
-wandb_activate: False
-wandb_group: ''
+wandb_activate: True
+wandb_group: 'handytrack-experiments'
 wandb_name: ${rl_train.params.config.name}
-wandb_entity: null  # set to your wandb entity if using wandb
-wandb_project: null  # set to your wandb project if using wandb
-wandb_tags: []
+wandb_entity: jiiiisoo  # set to your wandb entity if using wandb
+wandb_project: handytrack-rl  # set to your wandb project if using wandb
+wandb_tags: ['dexhand', 'imitation-learning', 'gigahands']
 wandb_logcode_dir: '' 
 
 capture_video: False
