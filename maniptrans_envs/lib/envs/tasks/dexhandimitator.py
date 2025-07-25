@@ -219,7 +219,9 @@ class DexHandImitatorRHEnv(VecTask):
         mujoco2gym_transf[:3, :3] = aa_to_rotmat(np.array([0, 0, -np.pi / 2])) @ aa_to_rotmat(
             np.array([np.pi / 2, 0, 0])
         )
-        mujoco2gym_transf[:3, 3] = np.array([0, 0, self._table_surface_z])
+        # mujoco2gym_transf[:3, 3] = np.array([0, 0, self._table_surface_z])
+        # Use fixed height for coordinate transformation, independent of table height
+        mujoco2gym_transf[:3, 3] = np.array([0, 0, 0.5])  # Fixed at 0.5m like mano2dexhand_gigahands.py
         self.mujoco2gym_transf = torch.tensor(mujoco2gym_transf, device=self.sim_device, dtype=torch.float32)
 
         # data_type 설정 확인
@@ -233,7 +235,7 @@ class DexHandImitatorRHEnv(VecTask):
                 # GigaHands 데이터셋의 모든 시퀀스 인덱스 생성 (메모리 효율적)
                 import json
                 import random
-                gigahands_dir = self.cfg["env"].get("gigahands_data_dir", "/scratch2/jisoo6687/gigahands/handpose")
+                gigahands_dir = self.cfg["env"].get("gigahands_data_dir", "/mnt/ssd1/jisoo6687/hoi_dataset/gigahands/handpose")
                 annotations_file = os.path.join(gigahands_dir, "../annotations_v2.jsonl")
                 
                 all_indices = []
@@ -294,7 +296,7 @@ class DexHandImitatorRHEnv(VecTask):
             
             # 데이터셋별 특수 설정
             if dataset_type == "gigahands" or config_data_type == "gigahands":
-                gigahands_dir = self.cfg["env"].get("gigahands_data_dir", "/scratch2/jisoo6687/gigahands/handpose")
+                gigahands_dir = self.cfg["env"].get("gigahands_data_dir", "/mnt/ssd1/jisoo6687/hoi_dataset/gigahands/handpose")
                 create_kwargs["data_dir"] = gigahands_dir
                 print(f"DEBUG: Setting gigahands data_dir to: {create_kwargs['data_dir']}")
             
@@ -303,10 +305,10 @@ class DexHandImitatorRHEnv(VecTask):
 
         # 데이터셋 생성 후 유효성 검증
         if config_data_type == "gigahands" and len(self.dataIndices) > 0:
-            print(f"Validating {len(self.dataIndices)} GigaHands sequences...")
+            print(f"Validating {len(self.dataIndices[:10])} GigaHands sequences...")
             valid_indices = []
             
-            for idx in tqdm(self.dataIndices, desc="Validating sequences"):
+            for idx in tqdm(self.dataIndices[:10], desc="Validating sequences"):
                 # 실제로 데이터 로드 시도
                 dataset_type = ManipDataFactory.dataset_type(idx)
                 test_data = self.demo_dataset_dict[dataset_type][idx]
@@ -497,6 +499,55 @@ class DexHandImitatorRHEnv(VecTask):
             if self.aggregate_mode > 0:
                 self.gym.end_aggregate(env_ptr)
 
+            # Create colored spheres for MANO joint visualization (only if not headless)
+            # NOTE: Create spheres AFTER ending aggregate mode to ensure they're visible
+            if not self.headless:
+                scene_asset_options = gymapi.AssetOptions()
+                scene_asset_options.fix_base_link = True
+                
+                for joint_vis_id, joint_name in enumerate(self.dexhand.body_names):
+                    hand_joint_name = self.dexhand.to_hand(joint_name)[0]
+                    
+                    # Create larger sphere for better visibility
+                    joint_sphere = self.gym.create_sphere(self.sim, 0.015, scene_asset_options)  # 15mm radius for better visibility
+                    
+                    # Set initial position near the hand (will be updated later)
+                    initial_pose = gymapi.Transform()
+                    initial_pose.p = gymapi.Vec3(
+                        self.dexhand_pose.p.x + 0.02 * joint_vis_id,  # Spread them out initially
+                        self.dexhand_pose.p.y, 
+                        self.dexhand_pose.p.z + 0.05
+                    )
+                    initial_pose.r = gymapi.Quat(0, 0, 0, 1)
+                    
+                    sphere_actor = self.gym.create_actor(
+                        env_ptr, 
+                        joint_sphere, 
+                        initial_pose, 
+                        f"mano_joint_{joint_vis_id}", 
+                        i + self.num_envs + 200,  # Different collision group
+                        0b1  # Only collide with itself
+                    )
+                    
+                    # Set colors based on finger type (same as mano2dexhand_gigahands.py)
+                    if "thumb" in hand_joint_name:
+                        color = gymapi.Vec3(1.0, 0.0, 0.0)  # Red for thumb
+                    elif "index" in hand_joint_name:
+                        color = gymapi.Vec3(1.0, 0.5, 0.0)  # Orange for index
+                    elif "middle" in hand_joint_name:
+                        color = gymapi.Vec3(1.0, 1.0, 0.0)  # Yellow for middle
+                    elif "ring" in hand_joint_name:
+                        color = gymapi.Vec3(0.0, 1.0, 0.0)  # Green for ring
+                    elif "pinky" in hand_joint_name:
+                        color = gymapi.Vec3(0.5, 0.0, 1.0)  # Purple for pinky
+                    elif "wrist" in hand_joint_name or hand_joint_name == "palm":
+                        color = gymapi.Vec3(0.0, 1.0, 1.0)  # Cyan for wrist/palm
+                    else:
+                        color = gymapi.Vec3(0.7, 0.7, 0.7)  # Gray for others
+                    
+                    # Apply the color
+                    self.gym.set_rigid_body_color(env_ptr, sphere_actor, 0, gymapi.MESH_VISUAL, color)
+
             # Store the created env pointers
             self.envs.append(env_ptr)
             self.dexhands.append(dexhand_actor)
@@ -514,9 +565,26 @@ class DexHandImitatorRHEnv(VecTask):
         self.dexhand_cf_weights = {
             k: (1.0 if ("intermediate" in k or "distal" in k) else 0.0) for k in self.dexhand.body_names
         }
+        
         # Get total DOFs
         self.num_dofs = self.gym.get_sim_dof_count(self.sim) // self.num_envs
 
+        # Setup tensor buffers
+        self.init_buffers()
+
+        # Setup MANO joint sphere handles for visualization (only if not headless)
+        if not self.headless:
+            self.mano_joint_points = [
+                self._root_state[:, self.gym.find_actor_handle(env_ptr, f"mano_joint_{i}"), :]
+                for i in range(len(self.dexhand.body_names))
+            ]
+
+    def init_buffers(self):
+        """Initialize all tensor buffers"""
+        # Setup sim handles
+        env_ptr = self.envs[0]
+        dexhand_handle = self.gym.find_actor_handle(env_ptr, "dexhand")
+        
         # Setup tensor buffers
         _actor_root_state_tensor = self.gym.acquire_actor_root_state_tensor(self.sim)
         _dof_state_tensor = self.gym.acquire_dof_state_tensor(self.sim)
@@ -530,15 +598,6 @@ class DexHandImitatorRHEnv(VecTask):
         self._q = self._dof_state[..., 0]
         self._qd = self._dof_state[..., 1]
         self._base_state = self._root_state[:, 0, :]
-
-        # ? >>> for visualization
-        if not self.headless:
-
-            self.mano_joint_points = [
-                self._root_state[:, self.gym.find_actor_handle(env_ptr, f"mano_joint_{i}"), :]
-                for i in range(self.dexhand.n_bodies)
-            ]
-        # ? <<<
 
         self.net_cf = gymtorch.wrap_tensor(_net_cf).view(self.num_envs, -1, 3)
         self.dof_force = gymtorch.wrap_tensor(_dof_force).view(self.num_envs, -1)
@@ -610,8 +669,6 @@ class DexHandImitatorRHEnv(VecTask):
             elif type(data[0][k]) == torch.Tensor:
                 stack_data = [d[k] for d in data]
                 if k != "obj_verts":
-                    print(f'stack_data shape: {stack_data[0].shape}')
-                    print(f'k: {k}')
                     packed_data[k] = fill_data(stack_data)
                 else:
                     packed_data[k] = torch.stack(stack_data).squeeze()
@@ -774,7 +831,7 @@ class DexHandImitatorRHEnv(VecTask):
                     cur_com_pos = (
                         quat_to_rotmat(self.states["manip_obj_quat"][:, [1, 2, 3, 0]])
                         @ self.manip_obj_com.unsqueeze(-1)
-                    ).squeeze(-1) + self.states["manip_obj_pos"]
+                    ).squeeze() + self.states["manip_obj_pos"]
                     pri_obs_values.append(cur_com_pos - self.states["base_state"][:, :3])
                 elif ob == "manip_obj_weight":
                     prop = self.gym.get_sim_params(self.sim)
@@ -1042,6 +1099,7 @@ class DexHandImitatorRHEnv(VecTask):
         return obs, rew, done, info
 
     def pre_physics_step(self, actions):
+        self.actions = actions
 
         # ? >>> for visualization
         if not self.headless:
@@ -1055,25 +1113,22 @@ class DexHandImitatorRHEnv(VecTask):
             )
             cur_mano_joint_pos = torch.cat([cur_wrist_pos[:, None], cur_mano_joint_pos], dim=1)
 
+            # Update colored sphere positions for MANO joint visualization
             for k in range(len(self.mano_joint_points)):
+                # Update the position in the tensor
                 self.mano_joint_points[k][:, :3] = cur_mano_joint_pos[:, k]
+                # Reset velocity and angular velocity to prevent unwanted movement
+                self.mano_joint_points[k][:, 7:] = 0
+            
+            # Apply the updated positions to Isaac Gym simulation
+            self.gym.set_actor_root_state_tensor(self.sim, gymtorch.unwrap_tensor(self._root_state))
 
-            self.gym.clear_lines(self.viewer)
+            # Update force visualization
             for env_id, env_ptr in enumerate(self.envs):
                 for k in self.dexhand.body_names:
                     self.set_force_vis(
                         env_ptr, k, torch.norm(self.net_cf[env_id, self.dexhand_handles[k]], dim=-1) != 0
                     )
-
-                def add_lines(viewer, env_ptr, hand_joints, color):
-                    assert hand_joints.shape[0] == self.dexhand.n_bodies and hand_joints.shape[1] == 3
-                    hand_joints = hand_joints.cpu().numpy()
-                    lines = np.array([[hand_joints[b[0]], hand_joints[b[1]]] for b in self.dexhand.bone_links])
-                    for line in lines:
-                        self.gym.add_lines(viewer, env_ptr, 1, line, color)
-
-                color = np.array([[0.0, 1.0, 0.0]], dtype=np.float32)
-                add_lines(self.viewer, env_ptr, cur_mano_joint_pos[env_id].cpu(), color)
 
         # ? <<< for visualization
         curr_act_moving_average = self.act_moving_average
@@ -1240,7 +1295,7 @@ def compute_imitation_reward(
     max_length: List[int],
     scale_factor: float,
     dexhand_weight_idx: Dict[str, List[int]],
-) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
+) -> Tuple[Tensor, Tensor, Tensor, Tensor, Dict[str, Tensor]]:
 
     # type: (Tensor, Tensor, Tensor, Tensor, Dict[str, Tensor], Dict[str, Tensor], Tensor, float, Dict[str, List[int]]) -> Tuple[Tensor, Tensor, Tensor, Tensor, Dict[str, Tensor]]
 
