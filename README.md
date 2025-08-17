@@ -1,5 +1,5 @@
-# ManipTrans: Efficient Dexterous Bimanual Manipulation Transfer via Residual Learning
-<div align="center">
+<!-- # ManipTrans: Efficient Dexterous Bimanual Manipulation Transfer via Residual Learning -->
+<!-- <div align="center">
 
 
 <p><strong>Accepted to CVPR 2025</strong></p>
@@ -20,15 +20,15 @@ ______________________________________________________________________
     <a href='https://maniptrans.github.io/'>
         <img src='https://img.shields.io/badge/Project-orange?style=for-the-badge&labelColor=D35400' alt='Project Page'></a>
     <a href='https://huggingface.co/datasets/LiKailin/DexManipNet'>
-        <img src='https://img.shields.io/badge/Dataset-orange?style=for-the-badge&labelColor=FFD21E&color=FFD21E' alt='Dataset'></a>
+        <img src='https://img.shields.io/badge/Dataset-orange?style=for-the-badge&labelColor=FFD21E&color=FFD21E' alt='Dataset'></a> -->
     <!-- <a href=""><img alt="youtube views" src="https://img.shields.io/badge/Video-red?style=for-the-badge&logo=youtube&labelColor=ce4630&logoColor=red"/></a> -->
     
-</p>
+<!-- </p> -->
 
 <!-- teaser image -->
-<p align="center">
-    <img src="assets/teaser.png" alt="teaser" width="100%">
-</p>
+<!-- <p align="center"> -->
+    <!-- <img src="assets/teaser.png" alt="teaser" width="100%"> -->
+<!-- </p> -->
 
 ## 📑 Table of Contents
 1. [Installation](#Installation)
@@ -136,6 +136,20 @@ ______________________________________________________________________
 
 ## ▶️ Usage
 <a id="usage"></a>
+
+### Training Imitator
+> **Note:** For `Gigahands`, erase dataIndices and modify data_type in main/cfg/config.yaml . For `OakInk2`, select dataIndices according to file name of each motion sequences.
+
+
+```bash
+# in 6D-Force mode
+python main/rl/train.py dexhand=inspire task=DexHandImitator side=RH headless=true num_envs=5120 test=false randomStateInit=true dataIndices=[20aed@0,e9aab@2,925aa@1] learning_rate=2e-4 actionsMovingAverage=0.4 usePIDControl=False
+```
+
+```bash
+# in PID-controlled mode
+python main/rl/train.py dexhand=inspire task=DexHandImitator side=RH headless=true num_envs=5120 test=false randomStateInit=true dataIndices=[20aed@0,e9aab@2,925aa@1] learning_rate=2e-4 actionsMovingAverage=0.4 usePIDControl=True
+```
 
 ### ✋ Training Single-Hand Policies
 
