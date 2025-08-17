@@ -1,35 +1,3 @@
-<!-- # ManipTrans: Efficient Dexterous Bimanual Manipulation Transfer via Residual Learning -->
-<!-- <div align="center">
-
-
-<p><strong>Accepted to CVPR 2025</strong></p>
-
-[Kailin Li](https://kailinli.top),
-[Puhao Li](https://xiaoyao-li.github.io/),
-[Tengyu Liu](https://tengyu.ai/),
-[Yuyang Li](https://yuyangli.com/),
-[Siyuan Huang](https://siyuanhuang.com/)
-
-______________________________________________________________________
-</div>
-
-
-<p align="center">
-    <a href="https://arxiv.org/abs/2503.21860">
-        <img src='https://img.shields.io/badge/Paper-red?style=for-the-badge&labelColor=B31B1B&color=B31B1B' alt='Paper PDF'></a>
-    <a href='https://maniptrans.github.io/'>
-        <img src='https://img.shields.io/badge/Project-orange?style=for-the-badge&labelColor=D35400' alt='Project Page'></a>
-    <a href='https://huggingface.co/datasets/LiKailin/DexManipNet'>
-        <img src='https://img.shields.io/badge/Dataset-orange?style=for-the-badge&labelColor=FFD21E&color=FFD21E' alt='Dataset'></a> -->
-    <!-- <a href=""><img alt="youtube views" src="https://img.shields.io/badge/Video-red?style=for-the-badge&logo=youtube&labelColor=ce4630&logoColor=red"/></a> -->
-    
-<!-- </p> -->
-
-<!-- teaser image -->
-<!-- <p align="center"> -->
-    <!-- <img src="assets/teaser.png" alt="teaser" width="100%"> -->
-<!-- </p> -->
-
 ## 📑 Table of Contents
 1. [Installation](#Installation)
 2. [Prerequisites](#Prerequisites)
