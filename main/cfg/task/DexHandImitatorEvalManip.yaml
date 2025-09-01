@@ -1,0 +1,150 @@
+# used to create the object
+name: ${concat:DexHandImitatorEvalManip,${..side}}
+
+physics_engine: ${..physics_engine}
+seed: ${..seed}
+
+# if given, will override the device setting in gym.
+env:
+  numEnvs: ${resolve_default:8192,${...num_envs}}
+  dexhand: ${...dexhand}
+
+  episodeLength: 2000
+  training: ${if:${...test},False,True}
+
+  usePIDControl: ${...usePIDControl}
+
+  rolloutStateInit: ${resolve_default:False,${...rolloutStateInit}}
+  randomStateInit: ${resolve_default:True,${...randomStateInit}}
+
+  dataIndices: ${resolve_default:[],${...dataIndices}}
+  obsFutureLength: 1
+
+  clipObservations: 5.0
+  clipActions: 1.0
+
+  furniture: just_one_leg
+
+  frankaDofNoise: 0.25
+
+  targetLiftHeight: 0.05
+  distanceReward: 0.1
+  liftReward: 1.0
+  successReward: 1.0
+
+  aggregateMode: 3
+
+  tightenMethod: "exp_decay"
+  tightenFactor: 0.7 # 1.0 means no tightening restriction
+  tightenSteps: 128000
+
+  actionScale: 1.0
+  useQuatRot: false
+
+  # for distillation
+  propDumpInfo:
+    q: ${ndof:${....dexhand}}
+    dq: ${ndof:${....dexhand}}
+    base_state: 13
+
+  actionsMovingAverage: ${...actionsMovingAverage}
+  translationScale: 1.0
+  orientationScale: 0.1
+  bimanual_mode: ${...bimanual_mode}
+
+  propObsDim: ${is_both_hands:${eval:'13+${ndof:${...dexhand}}*3'},${...side}}
+  obsKeys:
+    - q
+    - cos_q
+    - sin_q
+    - base_state
+
+  privilegedObsDim: ${is_both_hands:${eval:'${ndof:${...dexhand}}'},${...side}}
+  privilegedObsKeys:
+    - dq
+
+  # set to True if you use camera sensors in the environment
+  enableCameraSensors: False
+
+sim:
+  dt: 0.0166667 # 1/60
+  substeps: 2
+  up_axis: "z"
+  use_gpu_pipeline: ${eq:${...pipeline},"gpu"}
+  gravity: [0.0, 0.0, -9.81]
+  physx:
+    num_threads: ${....num_threads}
+    solver_type: ${....solver_type}
+    use_gpu: ${contains:"cuda",${....sim_device}} # set to False to run on CPU
+    num_position_iterations: 8
+    num_velocity_iterations: 1
+    contact_offset: 0.005
+    rest_offset: 0.0
+    bounce_threshold_velocity: 0.2
+    max_depenetration_velocity: 1000.0
+    default_buffer_size_multiplier: 5.0
+    max_gpu_contact_pairs: 1048576 # 1024*1024
+    num_subscenes: ${....num_subscenes}
+    contact_collection: 1 # 0: CC_NEVER, 1: CC_LAST_SUBSTEP
+
+task:
+  randomize: False
+  randomization_params:
+    frequency: 1
+    sim_params:
+      gravity:
+        range: [ 0, 0.4 ]
+        operation: "additive"
+        distribution: "uniform"
+        schedule: "linear"
+        schedule_steps: 100000000
+    actor_params:
+      table:
+        color: True
+        rigid_shape_properties:
+          friction:
+            num_buckets: 250
+            range: [ 0.5, 1.5 ]
+            operation: "scaling"
+            distribution: "uniform"
+            schedule: "linear"
+            schedule_steps: 100000000
+      manip_obj:
+        color: True
+        rigid_shape_properties:
+          friction:
+            num_buckets: 250
+            operation: "scaling"
+            schedule: "linear_decay"
+            schedule_steps: 1920
+            external_sample:
+              type: "const_scale"
+              init_value: 3
+              upper_bound: 6.0
+              lower_bound: 1.0
+      manip_obj_rh:
+        color: True
+        rigid_shape_properties:
+          friction:
+            num_buckets: 250
+            operation: "scaling"
+            schedule: "linear_decay"
+            schedule_steps: 1920
+            external_sample:
+              type: "const_scale"
+              init_value: 3
+              upper_bound: 6.0
+              lower_bound: 1.0
+      manip_obj_lh:
+        color: True
+        rigid_shape_properties:
+          friction:
+            num_buckets: 250
+            operation: "scaling"
+            schedule: "linear_decay"
+            schedule_steps: 1920
+            external_sample:
+              type: "const_scale"
+              init_value: 3
+              upper_bound: 6.0
+              lower_bound: 1.0
