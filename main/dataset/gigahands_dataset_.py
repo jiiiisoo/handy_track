@@ -30,7 +30,7 @@ class GigaHandsDataset(ManipData):
         dexhand=None,
         verbose=False,
         data_indices: List[str] = None,
-        max_motion_length: int = 100,
+        max_motion_length: int = 51,
         embodiment: str = "inspire",
         side: str = "right",
         **kwargs,
@@ -68,12 +68,18 @@ class GigaHandsDataset(ManipData):
         # Load annotations
         self.json_file = os.path.join(data_dir, '../annotations_v2.jsonl')
         
-        # # Load mean and std for normalization
-        # self.mean_path = os.path.join(data_dir, '../giga_mean_kp.npy')
-        # self.std_path = os.path.join(data_dir, '../giga_std_kp.npy')
-
-        # self.mean = torch.tensor(np.load(self.mean_path), device=device)
-        # self.std = torch.tensor(np.load(self.std_path), device=device)
+        # Load mean and std for normalization
+        self.mean_path = os.path.join(data_dir, '../giga_mean_kp.npy')
+        self.std_path = os.path.join(data_dir, '../giga_std_kp.npy')
+        
+        if os.path.exists(self.mean_path) and os.path.exists(self.std_path):
+            self.mean = torch.tensor(np.load(self.mean_path), device=device)
+            self.std = torch.tensor(np.load(self.std_path), device=device)
+        else:
+            if verbose:
+                cprint(f"Warning: Mean/std files not found. Using default normalization.", "yellow")
+            self.mean = torch.zeros(126, device=device)  # 42*3 for keypoints
+            self.std = torch.ones(126, device=device)
         
         # Load data paths based on indices
         self._load_data_paths()
@@ -235,16 +241,19 @@ class GigaHandsDataset(ManipData):
         seq_info = self.sequence_info[idx]
         data_path = seq_info['path']
         
-        with open(data_path, "r") as f:
-            mano_kp = json.load(f)  # [F, 42*3]
-
-        # params_path: .../keypoints_3d_mano/000.json -> .../params/000.json
-        params_path = data_path.replace("keypoints_3d_mano", "params")
-        with open(params_path, "r") as f:
-            if self.side == "right":
-                mano_motion = json.load(f)['right']['poses']
-            else:
-                mano_motion = json.load(f)['left']['poses']
+        if not data_path or not os.path.exists(data_path):
+            # 파일이 없는 경우 더미 데이터 반환
+            T = self.max_motion_length
+            return torch.zeros(T, 126, device=self.device), T
+        
+        try:
+            with open(data_path, "r") as f:
+                mano_kp = json.load(f)  # [F, 42*3]
+        except Exception as e:
+            if self.verbose:
+                cprint(f"Warning: Failed to load motion data from {data_path}: {e}", "yellow")
+            T = self.max_motion_length
+            return torch.zeros(T, 126, device=self.device), T
         
         start, end = seq_info['chosen_frames']
         frame_offset = seq_info.get('frame_offset', 0)
@@ -252,20 +261,17 @@ class GigaHandsDataset(ManipData):
         # 프레임 범위 조정
         if end == -1:
             motion = np.array(mano_kp)[start:]
-            mano_motion = np.array(mano_motion)[start:]
         else:
             motion = np.array(mano_kp)[start:end+1]
-            mano_motion = np.array(mano_motion)[start:end+1]
         
         # 특정 프레임부터 시작하는 경우
         if frame_offset > 0 and frame_offset < len(motion):
             motion = motion[frame_offset:]
         
         motion = torch.tensor(motion, dtype=torch.float32, device=self.device)
-        mano_motion = torch.tensor(mano_motion, dtype=torch.float32)
         
         # 정규화
-        # motion = (motion - self.mean) / self.std
+        motion = (motion - self.mean) / self.std
         
         m_length = motion.shape[0]
         
@@ -279,16 +285,16 @@ class GigaHandsDataset(ManipData):
             padding = torch.zeros((self.max_motion_length - m_length, motion.shape[1]), device=self.device)
             motion = torch.cat([motion, padding], dim=0)
         
-        return motion, m_length, mano_motion
+        return motion, m_length
     
-    def _convert_to_manip_format(self, motion: torch.Tensor, mano_motion: torch.Tensor, seq_info: Dict) -> Dict:
+    def _convert_to_manip_format(self, motion: torch.Tensor, seq_info: Dict) -> Dict:
         """GigaHands 모션 데이터를 ManipTrans 형식으로 변환합니다."""
         # motion: [T, 126] -> [T, 42, 3] (42개 키포인트, 각각 x,y,z)
         motion_reshaped = motion.view(-1, 42, 3).to(self.device)
         if self.side == "right" :
-            motion_reshaped = motion_reshaped[:,21:,:]
-        else : 
             motion_reshaped = motion_reshaped[:,:21,:]
+        else : 
+            motion_reshaped = motion_reshaped[:,21:,:]
         
         # MANO 키포인트에서 필요한 정보 추출
         # 손목 위치 (첫 번째 키포인트를 손목으로 가정)
@@ -332,14 +338,12 @@ class GigaHandsDataset(ManipData):
             "pinky_tip": motion_reshaped[:, 20, :].detach()
         }
         # 손목 회전 계산
-        mano_layer = ManoLayer(
-            mano_root='/workspace/manopth/mano/models', 
-            use_pca=True, 
-            ncomps=6, 
-            flat_hand_mean=True
-        )
-        with torch.no_grad():
-            hand_verts, _, transform_abs = mano_layer(mano_motion, torch.ones(mano_motion.shape[0], 10))
+        # mano_layer = ManoLayer(
+        #     center_idx=0,
+        #     flat_hand_mean=True,
+        #     num_betas=10,
+        #     num_joints=21,
+        # )
         # hand_verts, hand_faces = mano_layer(
         #     pose=motion_reshaped[:, 3:66, :],
         #     betas=motion_reshaped[:, 66:66+10, :],
@@ -347,8 +351,7 @@ class GigaHandsDataset(ManipData):
         # )
         # print(f'hand_verts: {hand_verts.shape}')
         # transform_abs = torch.load("/scratch2/jisoo6687/handy_track/transform_abs.pt")
-        ###############oak dataset
-        # transform_abs = torch.ones(motion_reshaped.shape[0], 16, 4, 4)
+        transform_abs = torch.ones(motion_reshaped.shape[0], 16, 4, 4)
 
         wrist_pos = motion_reshaped[:, 0, :].detach()
         middle_pos = motion_reshaped[:, 9, :].detach()
@@ -357,18 +360,11 @@ class GigaHandsDataset(ManipData):
         wrist_pos += torch.tensor(dexhand.relative_translation, device=self.device)
         mano_rot_offset = dexhand.relative_rotation
         wrist_rot = transform_abs[:, 0, :3, :3].detach() @ np.repeat(mano_rot_offset[None], transform_abs.shape[0], axis=0)
-        wrist_rot = wrist_rot.to(self.device)        
-        ###############oak dataset
-
-        # hand_rot = mano_motion[:, :3].to(self.device) # global wrist rotation
-        # wrist_pos = motion_reshaped[:, 0, :].detach()
-        # middle_pos = motion_reshaped[:, 9, :].detach()
-        # wrist_pos = wrist_pos - (middle_pos - wrist_pos) * 0.25  # ? hack for wrist position
-        # inspire_rot_offset = self.dexhand.relative_rotation
         # wrist_rot = aa_to_rotmat(hand_rot) @ torch.tensor(
-        #     np.repeat(inspire_rot_offset[None], motion_reshaped.shape[0], axis=0), device=self.device
+            # np.repeat(inspire_rot_offset[None], length, axis=0), device=self.device
         # )
-
+        wrist_rot = wrist_rot.to(self.device)
+        
         # Object trajectory 계산: 손가락 팁들의 중심점
         finger_tips = [
             gigahands_mano_joints["thumb_tip"],
@@ -441,10 +437,10 @@ class GigaHandsDataset(ManipData):
                         seq_info['frame_offset'] = frame_offset
                         
                         # 모션 데이터 로드
-                        motion, motion_length, mano_motion = self._load_motion_data_with_info(seq_info)
+                        motion, motion_length = self._load_motion_data_with_info(seq_info)
                         
                         # ManipTrans 형식으로 변환
-                        data = self._convert_to_manip_format(motion, mano_motion, seq_info)
+                        data = self._convert_to_manip_format(motion, seq_info)
                         
                         # 처리 및 반환
                         self._finalize_data(data, i, seq_info)
@@ -458,10 +454,10 @@ class GigaHandsDataset(ManipData):
                         seq_info['frame_offset'] = frame_offset
                         
                         # 모션 데이터 로드
-                        motion, motion_length, mano_motion = self._load_motion_data_with_info(seq_info)
+                        motion, motion_length = self._load_motion_data_with_info(seq_info)
                         
                         # ManipTrans 형식으로 변환
-                        data = self._convert_to_manip_format(motion, mano_motion, seq_info)
+                        data = self._convert_to_manip_format(motion, seq_info)
                         
                         # 처리 및 반환
                         self._finalize_data(data, i, seq_info)
@@ -477,8 +473,8 @@ class GigaHandsDataset(ManipData):
             # 정수 인덱스 처리
             if 0 <= index < len(self.sequence_info):
                 seq_info = self.sequence_info[index]
-                motion, motion_length, mano_motion = self._load_motion_data_with_info(seq_info)
-                data = self._convert_to_manip_format(motion, mano_motion, seq_info)
+                motion, motion_length = self._load_motion_data_with_info(seq_info)
+                data = self._convert_to_manip_format(motion, seq_info)
                 self._finalize_data(data, index, seq_info)
             else:
                 if self.verbose:
@@ -493,17 +489,9 @@ class GigaHandsDataset(ManipData):
     def _load_motion_data_with_info(self, seq_info: Dict) -> Tuple[torch.Tensor, int]:
         """시퀀스 정보를 사용하여 모션 데이터를 로드합니다."""
         data_path = seq_info['path']
-        params_path = data_path.replace("keypoints_3d_mano", "params")
+            
         with open(data_path, "r") as f:
             mano_kp = json.load(f)  # [F, 42*3]
-
-        with open(params_path, "r") as f:
-            if self.side == "right":
-                mano_motion = json.load(f)['right']['poses']
-                dexhand = DexHandFactory.create_hand(dexhand_type="inspire", side="right")
-            else:
-                mano_motion = json.load(f)['left']['poses']
-                dexhand = DexHandFactory.create_hand(dexhand_type="inspire", side="left")
         
         start, end = seq_info['chosen_frames']
         frame_offset = seq_info.get('frame_offset', None)
@@ -511,10 +499,8 @@ class GigaHandsDataset(ManipData):
         # 프레임 범위 조정
         if end == -1:
             motion = np.array(mano_kp)[start:]
-            mano_motion = np.array(mano_motion)[start:]
         else:
             motion = np.array(mano_kp)[start:end+1]
-            mano_motion = np.array(mano_motion)[start:end+1]
         
         original_length = len(motion)
         
@@ -530,7 +516,6 @@ class GigaHandsDataset(ManipData):
                 max_start_idx = original_length - self.max_motion_length
                 random_start = np.random.randint(0, max_start_idx + 1)
                 motion = motion[random_start:random_start + self.max_motion_length]
-                mano_motion = mano_motion[random_start:random_start + self.max_motion_length]
                 if self.verbose:
                     cprint(f"Random sampling: start={random_start}, length={self.max_motion_length}, total={original_length}", "cyan")
             else:
@@ -539,10 +524,9 @@ class GigaHandsDataset(ManipData):
                     cprint(f"Using full sequence: length={original_length}, max={self.max_motion_length}", "cyan")
         
         motion = torch.tensor(motion, dtype=torch.float32, device=self.device)
-        mano_motion = torch.tensor(mano_motion, dtype=torch.float32)
         
         # 정규화
-        # motion = (motion - self.mean) / self.std
+        motion = (motion - self.mean) / self.std
         
         m_length = motion.shape[0]
         
@@ -556,7 +540,7 @@ class GigaHandsDataset(ManipData):
             padding = torch.zeros((self.max_motion_length - m_length, motion.shape[1]), device=self.device)
             motion = torch.cat([motion, padding], dim=0)
         
-        return motion, m_length, mano_motion
+        return motion, m_length
     
     def _finalize_data(self, data: Dict, idx: int, seq_info: Dict) -> Dict:
         """데이터 처리를 완료하고 반환합니다."""
@@ -585,6 +569,12 @@ class GigaHandsDataset(ManipData):
         self.load_retargeted_data(data, retargeted_data_path)
         
         return data
+
+    
+    def inv_transform(self, data: torch.Tensor) -> torch.Tensor:
+        """정규화를 역변환합니다."""
+        return data * self.std + self.mean
+
 
 def create_gigahands_dataset(
     data_dir: str = None,

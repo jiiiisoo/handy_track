@@ -71,11 +71,11 @@ class ManipDataFactory:
         if type(index) == str and "@" in index:
             # GigaHands 데이터셋 인덱스 형식: seq_id@frame_offset
             # 3자리 숫자 형태도 GigaHands로 인식하도록 수정
-            seq_part = index.split("@")[0]
-            if any(char.isalpha() for char in seq_part) or (seq_part.isdigit() and len(seq_part) == 3):
-                dtype = "gigahands"
-            else:
-                dtype = "oakink2"
+            # seq_part = index.split("@")[0]
+            # if any(char.isalpha() for char in seq_part) or (seq_part.isdigit() and len(seq_part) == 3):
+            #     dtype = "gigahands"
+            # else:
+            dtype = "oakink2"
         elif type(index) == str and "_" in index and index.startswith("p"):
             # 새로운 GigaHands 형식: "p019-makeup_063"
             # p로 시작하고 언더스코어를 포함하는 경우 GigaHands로 인식

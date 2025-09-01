@@ -376,12 +376,7 @@ class MyA2CBase(BaseAlgorithm):
 
         # folders inside <train_dir>/<experiment_dir> for a specific purpose
         self.nn_dir = os.path.join(self.experiment_dir, "nn")
-        # Allow overriding the TensorBoard summaries directory to align with WandB run dir
-        summaries_override = os.getenv("RLGAMES_SUMMARIES_DIR", None)
-        if summaries_override is not None and len(summaries_override) > 0:
-            self.summaries_dir = summaries_override
-        else:
-            self.summaries_dir = os.path.join(self.experiment_dir, "summaries")
+        self.summaries_dir = os.path.join(self.experiment_dir, "summaries")
 
         os.makedirs(self.train_dir, exist_ok=True)
         os.makedirs(self.experiment_dir, exist_ok=True)
@@ -493,50 +488,15 @@ class MyA2CBase(BaseAlgorithm):
         self.writer.add_scalar("performance/rl_update_time", update_time, frame)
         self.writer.add_scalar("performance/step_inference_time", play_time, frame)
         self.writer.add_scalar("performance/step_time", step_time, frame)
-        a_loss_mean = torch_ext.mean_list(a_losses).item()
-        c_loss_mean = torch_ext.mean_list(c_losses).item()
-        entropy_mean = torch_ext.mean_list(entropies).item()
-        kl_mean = torch_ext.mean_list(kls).item()
-        self.writer.add_scalar("losses/a_loss", a_loss_mean, frame)
-        self.writer.add_scalar("losses/c_loss", c_loss_mean, frame)
-        self.writer.add_scalar("losses/entropy", entropy_mean, frame)
+        self.writer.add_scalar("losses/a_loss", torch_ext.mean_list(a_losses).item(), frame)
+        self.writer.add_scalar("losses/c_loss", torch_ext.mean_list(c_losses).item(), frame)
+
+        self.writer.add_scalar("losses/entropy", torch_ext.mean_list(entropies).item(), frame)
         self.writer.add_scalar("info/last_lr", last_lr * lr_mul, frame)
         self.writer.add_scalar("info/lr_mul", lr_mul, frame)
         self.writer.add_scalar("info/e_clip", self.e_clip * lr_mul, frame)
-        self.writer.add_scalar("info/kl", kl_mean, frame)
+        self.writer.add_scalar("info/kl", torch_ext.mean_list(kls).item(), frame)
         self.writer.add_scalar("info/epochs", epoch_num, frame)
-
-        # Mirror key scalars to WandB directly so no TensorBoard file watching is needed
-        wandb_logs = {
-            "performance/step_inference_rl_update_fps": curr_frames / scaled_time,
-            "performance/step_inference_fps": curr_frames / scaled_play_time,
-            "performance/step_fps": curr_frames / step_time,
-            "performance/rl_update_time": update_time,
-            "performance/step_inference_time": play_time,
-            "performance/step_time": step_time,
-            "losses/a_loss": a_loss_mean,
-            "losses/c_loss": c_loss_mean,
-            "losses/entropy": entropy_mean,
-            "info/last_lr": last_lr * lr_mul,
-            "info/lr_mul": lr_mul,
-            "info/e_clip": self.e_clip * lr_mul,
-            "info/kl": kl_mean,
-            "info/epochs": epoch_num,
-        }
-        # try:
-        import wandb  # local import to avoid hard dependency when disabled
-        wandb.log(wandb_logs, step=int(frame), commit=True)
-        if wandb.run is not None:
-            wandb.run.summary.update({
-                "losses/a_loss": a_loss_mean,
-                "losses/c_loss": c_loss_mean,
-                "losses/entropy": entropy_mean,
-                "info/kl": kl_mean,
-                "info/epochs": epoch_num,
-            })
-        # except Exception as e:
-        #     print(f"wandb.log in write_stats failed: {e}")
-
         self.algo_observer.after_print_stats(frame, epoch_num, total_time)
 
     def set_eval(self):
@@ -1396,26 +1356,21 @@ class MyContinuousA2CBase(MyA2CBase):
                 )
 
                 if len(b_losses) > 0:
-                    bounds_loss_mean = torch_ext.mean_list(b_losses).item()
                     self.writer.add_scalar(
                         "losses/bounds_loss",
-                        bounds_loss_mean,
+                        torch_ext.mean_list(b_losses).item(),
                         frame,
                     )
 
                 if self.has_soft_aug:
                     self.writer.add_scalar("losses/aug_loss", np.mean(aug_losses), frame)
 
-                wandb_step_logs = {}
                 mean_success_rate = None
                 if self.game_success.current_size > 0:
                     mean_success_rate = self.game_success.get_mean()
                     self.writer.add_scalar("success_rate/step", mean_success_rate, frame)
                     self.writer.add_scalar("success_rate/iter", mean_success_rate, epoch_num)
                     self.writer.add_scalar("success_rate/time", mean_success_rate, total_time)
-                    wandb_step_logs["success_rate/step"] = float(mean_success_rate)
-                    wandb_step_logs["success_rate/iter"] = float(mean_success_rate)
-                    wandb_step_logs["success_rate/time"] = float(mean_success_rate)
 
                 mean_fail_rate = None
                 if self.game_fails.current_size > 0:
@@ -1423,9 +1378,6 @@ class MyContinuousA2CBase(MyA2CBase):
                     self.writer.add_scalar("fail_rate/step", mean_fail_rate, frame)
                     self.writer.add_scalar("fail_rate/iter", mean_fail_rate, epoch_num)
                     self.writer.add_scalar("fail_rate/time", mean_fail_rate, total_time)
-                    wandb_step_logs["fail_rate/step"] = float(mean_fail_rate)
-                    wandb_step_logs["fail_rate/iter"] = float(mean_fail_rate)
-                    wandb_step_logs["fail_rate/time"] = float(mean_fail_rate)
 
                 if self.game_rewards.current_size > 0:
                     mean_rewards = self.game_rewards.get_mean()
@@ -1438,10 +1390,11 @@ class MyContinuousA2CBase(MyA2CBase):
                         self.writer.add_scalar(rewards_name + "/step".format(i), mean_rewards[i], frame)
                         self.writer.add_scalar(rewards_name + "/iter".format(i), mean_rewards[i], epoch_num)
                         self.reward_history.append(mean_rewards[i])
-                        self.writer.add_scalar(rewards_name + "/time".format(i), mean_rewards[i], total_time)
-                        wandb_step_logs[rewards_name + "/step"] = float(mean_rewards[i])
-                        wandb_step_logs[rewards_name + "/iter"] = float(mean_rewards[i])
-                        wandb_step_logs[rewards_name + "/time"] = float(mean_rewards[i])
+                        self.writer.add_scalar(
+                            rewards_name + "/time".format(i),
+                            mean_rewards[i],
+                            total_time,
+                        )
                         self.writer.add_scalar(
                             "shaped_" + rewards_name + "/step".format(i),
                             mean_shaped_rewards[i],
@@ -1457,34 +1410,15 @@ class MyContinuousA2CBase(MyA2CBase):
                             mean_shaped_rewards[i],
                             total_time,
                         )
-                        wandb_step_logs["shaped_" + rewards_name + "/step"] = float(mean_shaped_rewards[i])
-                        wandb_step_logs["shaped_" + rewards_name + "/iter"] = float(mean_shaped_rewards[i])
-                        wandb_step_logs["shaped_" + rewards_name + "/time"] = float(mean_shaped_rewards[i])
 
                     game_reward_dict = {k: v.get_mean() for k, v in self.game_reward_dict.items()}
                     self.writer.add_scalars("reward_dict/step", game_reward_dict, frame)
                     self.writer.add_scalars("reward_dict/iter", game_reward_dict, epoch_num)
                     self.writer.add_scalars("reward_dict/time", game_reward_dict, total_time)
-                    for k, v in game_reward_dict.items():
-                        wandb_step_logs[f"reward_dict/step/{k}"] = float(v)
-                        wandb_step_logs[f"reward_dict/iter/{k}"] = float(v)
-                        wandb_step_logs[f"reward_dict/time/{k}"] = float(v)
 
                     self.writer.add_scalar("episode_lengths/step", mean_lengths, frame)
                     self.writer.add_scalar("episode_lengths/iter", mean_lengths, epoch_num)
                     self.writer.add_scalar("episode_lengths/time", mean_lengths, total_time)
-                    wandb_step_logs["episode_lengths/step"] = float(mean_lengths)
-                    wandb_step_logs["episode_lengths/iter"] = float(mean_lengths)
-                    wandb_step_logs["episode_lengths/time"] = float(mean_lengths)
-
-                # Also include bounds loss if it was computed this epoch
-                if len(b_losses) > 0:
-                    wandb_step_logs["losses/bounds_loss"] = float(bounds_loss_mean)
-
-                # Flush the grouped logs to WandB
-                if len(wandb_step_logs) > 0:
-                    import wandb
-                    wandb.log(wandb_step_logs, step=int(frame), commit=False)
 
                     if self.has_self_play_config:
                         self.self_play_manager.update(self)

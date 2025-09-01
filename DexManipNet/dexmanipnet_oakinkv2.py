@@ -20,7 +20,7 @@ class DexManipNetOakInkV2(DexManipNet):
     def __getitem__(self, idx):
 
         data = super().__getitem__(idx)
-        seq_info = json.load(open(data["seq_info_path"], "r"))
+        # seq_info = json.load(open(data["seq_info_path"], "r"))
 
         if self.side != "lh":
             data["oid_rh"] = seq_info["oid_rh"]
@@ -29,8 +29,10 @@ class DexManipNetOakInkV2(DexManipNet):
             data["oid_lh"] = seq_info["oid_lh"]
             data["obj_lh_path"] = os.path.join(self.data_dir, seq_info["obj_lh_path"])
         data["scene_objs"] = []
-        data["start_frame"] = seq_info["start_frame"]
-        data["seq_len"] = seq_info["seq_len"]
+        # data["start_frame"] = seq_info["start_frame"]
+        # data["seq_len"] = seq_info["seq_len"]
+        data["start_frame"] = 0
+        data["seq_len"] = 100
         return data
 
 

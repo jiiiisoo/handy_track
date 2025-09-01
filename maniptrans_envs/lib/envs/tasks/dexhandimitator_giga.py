@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import json
 import random
 from enum import Enum
 from itertools import cycle
@@ -220,77 +219,108 @@ class DexHandImitatorRHEnv(VecTask):
         mujoco2gym_transf[:3, :3] = aa_to_rotmat(np.array([0, 0, -np.pi / 2])) @ aa_to_rotmat(
             np.array([np.pi / 2, 0, 0])
         )
-        mujoco2gym_transf[:3, 3] = np.array([0, 0, self._table_surface_z])
+        # mujoco2gym_transf[:3, 3] = np.array([0, 0, self._table_surface_z])
+        # Use fixed height for coordinate transformation, independent of table height
+        mujoco2gym_transf[:3, 3] = np.array([0, 0, 0.5])  # Fixed at 0.5m like mano2dexhand_gigahands.py
         self.mujoco2gym_transf = torch.tensor(mujoco2gym_transf, device=self.sim_device, dtype=torch.float32)
 
-        # Allow using all sequences/stages by passing dataIndices=["all"] or "all"
-        def _expand_all_oakink2_indices(data_dir_root: str):
-            anno_dir = os.path.join(data_dir_root, "anno_preview")
-            program_dir = os.path.join(data_dir_root, "program", "program_info")
-            all_indices = []
-            if not os.path.isdir(anno_dir):
-                return all_indices
-            for fname in sorted(os.listdir(anno_dir)):
-                if not fname.endswith(".pkl"):
-                    continue
-                seq_hash5 = fname.split("_")[5][:5]
-                program_path = os.path.join(program_dir, os.path.splitext(fname)[0] + ".json")
-                if not os.path.isfile(program_path):
-                    continue
-                try:
-                    raw = json.load(open(program_path, "r"))
-                except Exception:
-                    continue
-                # Enumerate stages that have right-hand data; preserve original stage indices
-                original_stage_keys = list(raw.keys())
-                for orig_idx, k in enumerate(original_stage_keys):
-                    try:
-                        seg_pair = eval(k)
-                        right_range = seg_pair[1]
-                        if right_range is not None:
-                            all_indices.append(f"{seq_hash5}@{orig_idx}")
-                    except Exception:
-                        continue
-            return all_indices
-
-        if (
-            isinstance(self.dataIndices, str)
-            and self.dataIndices.lower() == "all"
-        ) or (
-            isinstance(self.dataIndices, (list, tuple))
-            and len(self.dataIndices) == 1
-            and isinstance(self.dataIndices[0], str)
-            and self.dataIndices[0].lower() == "all"
-        ):
-            data_dir_root = self.cfg["env"].get("dataDir", "/mnt/ssd1/jisoo6687/hoi_dataset/data/OakInk-v2")
-            self.dataIndices = _expand_all_oakink2_indices(data_dir_root)
-        # Shard indices across distributed ranks to avoid duplication on multi-GPU
-        try:
-            world_size = int(os.getenv("WORLD_SIZE", "1"))
-            local_rank = int(os.getenv("LOCAL_RANK", os.getenv("RANK", "0")))
-        except Exception:
-            world_size, local_rank = 1, 0
-        if world_size > 1 and len(self.dataIndices) > 0:
-            self.dataIndices = self.dataIndices[local_rank :: world_size]
-            if len(self.dataIndices) == 0:
-                # Fallback: ensure at least something allocated for this rank
-                self.dataIndices = self.dataIndices[:]
-        # print(f'Rank {local_rank}/{world_size} dataIndices: {len(self.dataIndices)}')
-        # 1/0
+        # data_type 설정 확인
+        config_data_type = self.cfg["env"].get("data_type", "auto")
+        print(f"Config data_type: {config_data_type}")
         
-        dataset_list = list(set([ManipDataFactory.dataset_type(data_idx) for data_idx in self.dataIndices]))
+        # dataIndices가 빈 리스트이고 명시적 data_type이 지정된 경우, 모든 인덱스를 자동 생성
+        if len(self.dataIndices) == 0 and config_data_type != "auto":
+            print(f"Empty dataIndices with explicit data_type={config_data_type}, generating available indices...")
+            if config_data_type == "gigahands":
+                # GigaHands 데이터셋의 모든 시퀀스 인덱스 생성 (메모리 효율적)
+                import json
+                import random
+                gigahands_dir = self.cfg["env"].get("gigahands_data_dir", "/mnt/ssd1/jisoo6687/hoi_dataset/gigahands/handpose")
+                annotations_file = os.path.join(gigahands_dir, "../annotations_v2.jsonl")
+                
+                all_indices = []
+                with open(annotations_file, 'r', encoding='utf-8') as file:
+                    for i, line in enumerate(file):
+                        line = line.strip()
+                        if line:
+                            script_info = json.loads(line)
+                            scene = script_info['scene']
+                            seq = script_info['sequence'][0] if isinstance(script_info['sequence'], list) else script_info['sequence']
+                            script_text = script_info['clarify_annotation']
+                            
+                            # 유효한 시퀀스만 추가 (Buggy나 None 제외)
+                            if script_text != 'None' and script_text != 'Buggy':
+                                seq_path = os.path.join(gigahands_dir, scene, 'keypoints_3d_mano', seq + '.json')
+                                if os.path.exists(seq_path):
+                                    # 고유 식별자 생성: scene_sequence 형태로 중복 방지
+                                    unique_id = f"{scene}_{seq}"
+                                    all_indices.append(unique_id)
+                
+                # 사용할 시퀀스 수 결정 (환경 변수로 조절 가능)
+                max_sequences = self.cfg["env"].get("max_gigahands_sequences", len(all_indices))
+                
+                if max_sequences >= len(all_indices):
+                    # 모든 시퀀스 사용
+                    self.dataIndices = all_indices
+                    print(f"Generated {len(self.dataIndices)} GigaHands indices for validation")
+                else:
+                    # 랜덤 샘플링으로 지정된 수만큼 사용
+                    self.dataIndices = random.sample(all_indices, max_sequences)
+                    print(f"Generated {len(self.dataIndices)} randomly sampled GigaHands indices for validation")
+        
+        if config_data_type != "auto":
+            # 명시적 data_type이 지정된 경우 해당 타입만 사용
+            dataset_list = [config_data_type]
+            print(f"Using explicit data_type: {config_data_type}")
+        else:
+            # 기존 방식: dataIndices에서 자동 감지
+            dataset_list = list(set([ManipDataFactory.dataset_type(data_idx) for data_idx in self.dataIndices]))
+            print(f"Auto-detected dataset types: {dataset_list}")
 
         self.demo_dataset_dict = {}
         for dataset_type in dataset_list:
-            self.demo_dataset_dict[dataset_type] = ManipDataFactory.create_data(
-                manipdata_type=dataset_type,
-                side=self.side,
-                device=self.sim_device,
-                mujoco2gym_transf=self.mujoco2gym_transf,
-                max_seq_len=self.max_episode_length,
-                dexhand=self.dexhand,
-                embodiment=self.cfg["env"]["dexhand"],
-            )
+            create_kwargs = {
+                "manipdata_type": dataset_type,
+                "side": self.side,
+                "device": self.sim_device,
+                "mujoco2gym_transf": self.mujoco2gym_transf,
+                "max_seq_len": self.max_episode_length,
+                "dexhand": self.dexhand,
+                "embodiment": self.cfg["env"]["dexhand"],
+                "data_indices": self.dataIndices,
+            }
+            
+            # 명시적 data_type이 지정된 경우 추가
+            if config_data_type != "auto":
+                create_kwargs["data_type"] = config_data_type
+            
+            # 데이터셋별 특수 설정
+            if dataset_type == "gigahands" or config_data_type == "gigahands":
+                gigahands_dir = self.cfg["env"].get("gigahands_data_dir", "/mnt/ssd1/jisoo6687/hoi_dataset/gigahands/handpose")
+                create_kwargs["data_dir"] = gigahands_dir
+                print(f"DEBUG: Setting gigahands data_dir to: {create_kwargs['data_dir']}")
+            
+            print(f"Creating dataset with kwargs: {create_kwargs}")
+            self.demo_dataset_dict[dataset_type] = ManipDataFactory.create_data(**create_kwargs)
+
+        # 데이터셋 생성 후 유효성 검증
+        if config_data_type == "gigahands" and len(self.dataIndices) > 0:
+            print(f"Validating {len(self.dataIndices[:10])} GigaHands sequences...")
+            valid_indices = []
+            
+            for idx in tqdm(self.dataIndices[:10], desc="Validating sequences"):
+                # 실제로 데이터 로드 시도
+                dataset_type = ManipDataFactory.dataset_type(idx)
+                test_data = self.demo_dataset_dict[dataset_type][idx]
+                valid_indices.append(idx)
+            
+            # 유효한 시퀀스만 사용
+            original_count = len(self.dataIndices)
+            self.dataIndices = valid_indices
+            print(f"Validation complete: {len(valid_indices)}/{original_count} sequences are valid")
+            
+            if len(valid_indices) == 0:
+                raise ValueError("No valid GigaHands sequences found! Please check your data directory.")
 
         # load dexhand asset
         dexhand_asset_file = self.dexhand.urdf_path
@@ -326,10 +356,6 @@ class DexHandImitatorRHEnv(VecTask):
 
         rigid_shape_props_asset = self.gym.get_asset_rigid_shape_properties(dexhand_asset)
         for element in rigid_shape_props_asset:
-            try:
-                element.filter = 0
-            except Exception:
-                pass
             element.friction = 4.0
             element.rolling_friction = 0.01
             element.torsion_friction = 0.01
@@ -375,62 +401,48 @@ class DexHandImitatorRHEnv(VecTask):
 
         assert len(self.dataIndices) == 1 or not self.rollout_state_init, "rollout_state_init only works with one data"
 
+        # 동적 로딩을 위한 시퀀스 인덱스 저장
+        self.available_indices = self.dataIndices.copy()
+        self.sequence_counter = 0  # 전체 시퀀스 순환을 위한 카운터
+        
+        # 데이터셋 타입 리스트 (ManipDataFactory에서 필요)
         dataset_list = list(set([ManipDataFactory.dataset_type(data_idx) for data_idx in self.dataIndices]))
-
+        
+        print(f"Dynamic loading enabled with {len(self.available_indices)} total sequences")
+        print(f"Each epoch will cycle through different sequences for maximum data utilization")
+        
+        # 초기 데이터 로딩 (첫 번째 배치) - 예외 처리로 유효한 시퀀스만 로드
         def segment_data(k):
-            todo_list = self.dataIndices
-            idx = todo_list[k % len(todo_list)]
-            return self.demo_dataset_dict[ManipDataFactory.dataset_type(idx)][idx]
-
-        # === Batch-cycling setup ===
-        # Treat num_envs as the batch size. We'll iterate through all indices in chunks of size num_envs.
-        self._all_indices_pool = list(self.dataIndices)
-        self._bad_indices = set()
-        self._batch_offset = 0
-
-        def _select_index_for_env(k: int):
-            if len(self._all_indices_pool) == 0:
-                raise RuntimeError("No data indices available to load demos.")
-            return self._all_indices_pool[(self._batch_offset + k) % len(self._all_indices_pool)]
-
-        def _load_batch():
-            # Drop permanently-bad indices from the pool
-            if len(self._bad_indices) > 0:
-                self._all_indices_pool = [x for x in self._all_indices_pool if x not in self._bad_indices]
-            if len(self._all_indices_pool) == 0:
-                raise RuntimeError("No valid data indices available after filtering bad ones.")
-
-            batch = []
-            for i in tqdm(range(self.num_envs)):
-                base = self._batch_offset + i
-                loaded = False
-                # Try up to len(pool) different indices if some are broken
-                for shift in range(len(self._all_indices_pool)):
-                    idx = self._all_indices_pool[(base + shift) % len(self._all_indices_pool)]
-                    try:
-                        demo = self.demo_dataset_dict[ManipDataFactory.dataset_type(idx)][idx]
-                        batch.append(demo)
-                        loaded = True
-                        break
-                    except (KeyError, FileNotFoundError, AssertionError, IndexError) as e:
-                        print(f"Skipping invalid sequence {idx}: {e}")
-                        self._bad_indices.add(idx)
+            max_attempts = len(self.available_indices)  # 최대 시도 횟수
+            for attempt in range(max_attempts):
+                try:
+                    # 순환하면서 모든 시퀀스를 사용하도록 함
+                    idx = self.available_indices[(k + attempt) % len(self.available_indices)]
+                    return self.demo_dataset_dict[ManipDataFactory.dataset_type(idx)][idx]
+                except (KeyError, IndexError, FileNotFoundError) as e:
+                    if attempt < max_attempts - 1:  # 마지막 시도가 아니면 다음 시퀀스 시도
+                        print(f"Skipping invalid sequence {self.available_indices[(k + attempt) % len(self.available_indices)]}: {e}")
                         continue
-                    except Exception as e:
-                        # Unknown error: mark bad and continue
-                        print(f"Skipping sequence {idx} due to unexpected error: {e}")
-                        self._bad_indices.add(idx)
-                        continue
-                if not loaded:
-                    raise RuntimeError("Failed to assemble a full batch; too many invalid sequences.")
+            
+        def create_demo_data_safely():
+            """예외 처리와 함께 데모 데이터를 생성합니다."""
+            demo_data_list = []
+            valid_count = 0
+            
+            for i in tqdm(range(self.num_envs), desc="Loading demo data"):
+                try:
+                    data = segment_data(i)
+                    demo_data_list.append(data)
+                    valid_count += 1
+                except Exception as e:
+                    print(f"Failed to load data for environment {i}: {e}")
+                    demo_data_list.append(demo_data_list[0])
+            
+            print(f"Successfully loaded {valid_count}/{self.num_envs} sequences")
+            return demo_data_list
 
-            self.demo_data = self.pack_data(batch)
-
-        self._select_index_for_env = _select_index_for_env  # store for potential debug/introspection
-        self._load_batch = _load_batch
-
-        # Initial batch load
-        self._load_batch()
+        self.demo_data = create_demo_data_safely()
+        self.demo_data = self.pack_data(self.demo_data)
 
         # Create environments
         num_per_row = int(np.sqrt(self.num_envs))
@@ -467,7 +479,7 @@ class DexHandImitatorRHEnv(VecTask):
                 self.dexhand_pose,
                 "dexhand",
                 i,
-                0,
+                (1 if self.dexhand.self_collision else 0),  # ! some hand need to allow self-collision
             )
             self.gym.enable_actor_dof_force_sensors(env_ptr, dexhand_actor)
             self.gym.set_actor_dof_properties(env_ptr, dexhand_actor, dexhand_dof_props)
@@ -475,32 +487,66 @@ class DexHandImitatorRHEnv(VecTask):
             # Create table and obstacles
             table_pose = gymapi.Transform()
             table_pose.p = gymapi.Vec3(table_pos.x, table_pos.y, table_pos.z)
-            # Make table collidable (no filter bits set)
-            # table_actor = self.gym.create_actor(
-            #     env_ptr, table_asset, table_pose, "table", i + self.num_envs, 0b11
-            # )  # ignore collision
             table_actor = self.gym.create_actor(
-                env_ptr, table_asset, table_pose, "table", i, 0
-            )
+                env_ptr, table_asset, table_pose, "table", i + self.num_envs, 0b11
+            )  # ignore collision
             table_props = self.gym.get_actor_rigid_shape_properties(env_ptr, table_actor)
-            # Only one table shape in each env
-            try:
-                table_props[0].filter = 0
-            except Exception:
-                pass
-            table_props[0].friction = 0.1
+            table_props[0].friction = 0.1  # ? only one table shape in each env
             self.gym.set_actor_rigid_shape_properties(env_ptr, table_actor, table_props)
             # set table's color to be dark gray
             self.gym.set_rigid_body_color(env_ptr, table_actor, 0, gymapi.MESH_VISUAL, gymapi.Vec3(0.1, 0.1, 0.1))
 
-            # Allow subclasses to create extra actors for this env BEFORE closing aggregation
-            try:
-                self._post_create_actors(env_ptr, i)
-            except AttributeError:
-                pass
-
             if self.aggregate_mode > 0:
                 self.gym.end_aggregate(env_ptr)
+
+            # Create colored spheres for MANO joint visualization (only if not headless)
+            # NOTE: Create spheres AFTER ending aggregate mode to ensure they're visible
+            # if not self.headless:
+            #     scene_asset_options = gymapi.AssetOptions()
+            #     scene_asset_options.fix_base_link = True
+                
+            #     for joint_vis_id, joint_name in enumerate(self.dexhand.body_names):
+            #         hand_joint_name = self.dexhand.to_hand(joint_name)[0]
+                    
+            #         # Create larger sphere for better visibility
+            #         joint_sphere = self.gym.create_sphere(self.sim, 0.015, scene_asset_options)  # 15mm radius for better visibility
+                    
+            #         # Set initial position near the hand (will be updated later)
+            #         initial_pose = gymapi.Transform()
+            #         initial_pose.p = gymapi.Vec3(
+            #             self.dexhand_pose.p.x + 0.02 * joint_vis_id,  # Spread them out initially
+            #             self.dexhand_pose.p.y, 
+            #             self.dexhand_pose.p.z + 0.05
+            #         )
+            #         initial_pose.r = gymapi.Quat(0, 0, 0, 1)
+                    
+            #         sphere_actor = self.gym.create_actor(
+            #             env_ptr, 
+            #             joint_sphere, 
+            #             initial_pose, 
+            #             f"mano_joint_{joint_vis_id}", 
+            #             i + self.num_envs + 200,  # Different collision group
+            #             0b1  # Only collide with itself
+            #         )
+                    
+            #         # Set colors based on finger type (same as mano2dexhand_gigahands.py)
+            #         if "thumb" in hand_joint_name:
+            #             color = gymapi.Vec3(1.0, 0.0, 0.0)  # Red for thumb
+            #         elif "index" in hand_joint_name:
+            #             color = gymapi.Vec3(1.0, 0.5, 0.0)  # Orange for index
+            #         elif "middle" in hand_joint_name:
+            #             color = gymapi.Vec3(1.0, 1.0, 0.0)  # Yellow for middle
+            #         elif "ring" in hand_joint_name:
+            #             color = gymapi.Vec3(0.0, 1.0, 0.0)  # Green for ring
+            #         elif "pinky" in hand_joint_name:
+            #             color = gymapi.Vec3(0.5, 0.0, 1.0)  # Purple for pinky
+            #         elif "wrist" in hand_joint_name or hand_joint_name == "palm":
+            #             color = gymapi.Vec3(0.0, 1.0, 1.0)  # Cyan for wrist/palm
+            #         else:
+            #             color = gymapi.Vec3(0.7, 0.7, 0.7)  # Gray for others
+                    
+            #         # Apply the color
+            #         self.gym.set_rigid_body_color(env_ptr, sphere_actor, 0, gymapi.MESH_VISUAL, color)
 
             # Store the created env pointers
             self.envs.append(env_ptr)
@@ -508,12 +554,6 @@ class DexHandImitatorRHEnv(VecTask):
 
         # Setup data
         self.init_data()
-
-    def _post_create_actors(self, env_ptr, env_id):
-        """Hook for subclasses to add additional actors per env during creation.
-        Base implementation does nothing.
-        """
-        return
 
     def init_data(self):
         # Setup sim handles
@@ -525,9 +565,26 @@ class DexHandImitatorRHEnv(VecTask):
         self.dexhand_cf_weights = {
             k: (1.0 if ("intermediate" in k or "distal" in k) else 0.0) for k in self.dexhand.body_names
         }
+        
         # Get total DOFs
         self.num_dofs = self.gym.get_sim_dof_count(self.sim) // self.num_envs
 
+        # Setup tensor buffers
+        self.init_buffers()
+
+        # Setup MANO joint sphere handles for visualization (only if not headless)
+        if not self.headless:
+            self.mano_joint_points = [
+                self._root_state[:, self.gym.find_actor_handle(env_ptr, f"mano_joint_{i}"), :]
+                for i in range(len(self.dexhand.body_names))
+            ]
+
+    def init_buffers(self):
+        """Initialize all tensor buffers"""
+        # Setup sim handles
+        env_ptr = self.envs[0]
+        dexhand_handle = self.gym.find_actor_handle(env_ptr, "dexhand")
+        
         # Setup tensor buffers
         _actor_root_state_tensor = self.gym.acquire_actor_root_state_tensor(self.sim)
         _dof_state_tensor = self.gym.acquire_dof_state_tensor(self.sim)
@@ -541,15 +598,6 @@ class DexHandImitatorRHEnv(VecTask):
         self._q = self._dof_state[..., 0]
         self._qd = self._dof_state[..., 1]
         self._base_state = self._root_state[:, 0, :]
-
-        # ? >>> for visualization
-        if not self.headless:
-
-            self.mano_joint_points = [
-                self._root_state[:, self.gym.find_actor_handle(env_ptr, f"mano_joint_{i}"), :]
-                for i in range(self.dexhand.n_bodies)
-            ]
-        # ? <<<
 
         self.net_cf = gymtorch.wrap_tensor(_net_cf).view(self.num_envs, -1, 3)
         self.dof_force = gymtorch.wrap_tensor(_dof_force).view(self.num_envs, -1)
@@ -783,7 +831,7 @@ class DexHandImitatorRHEnv(VecTask):
                     cur_com_pos = (
                         quat_to_rotmat(self.states["manip_obj_quat"][:, [1, 2, 3, 0]])
                         @ self.manip_obj_com.unsqueeze(-1)
-                    ).squeeze(-1) + self.states["manip_obj_pos"]
+                    ).squeeze() + self.states["manip_obj_pos"]
                     pri_obs_values.append(cur_com_pos - self.states["base_state"][:, :3])
                 elif ob == "manip_obj_weight":
                     prop = self.gym.get_sim_params(self.sim)
@@ -880,7 +928,55 @@ class DexHandImitatorRHEnv(VecTask):
                 self.dump_fileds[prop_name][:] = self.states[prop_name][:]
         return self.obs_dict
 
+    def _load_new_sequences_for_envs(self, env_ids, new_sequence_indices):
+        """특정 환경들에 새로운 시퀀스를 동적으로 로드"""
+        if not hasattr(self, 'available_indices'):
+            return
+            
+        # 각 환경에 새로운 시퀀스 데이터 할당
+        for i, env_id in enumerate(env_ids):
+            seq_pool_idx = new_sequence_indices[i]
+            actual_seq_idx = self.available_indices[seq_pool_idx]
+            
+            try:
+                # 해당 시퀀스의 데이터를 데이터셋에서 로드
+                dataset_type = ManipDataFactory.dataset_type(actual_seq_idx)
+                new_seq_data = self.demo_dataset_dict[dataset_type][actual_seq_idx]
+                
+                # demo_data의 해당 환경 인덱스에 새 데이터 할당 (이미 처리된 데이터를 단순 교체)
+                for key in new_seq_data.keys():
+                    if key in self.demo_data and torch.is_tensor(new_seq_data[key]):
+                        self.demo_data[key][env_id] = new_seq_data[key]
+                        
+            except Exception as e:
+                print(f"Failed to load sequence {actual_seq_idx} for env {env_id}: {e}, keeping existing data")
+                continue  # 기존 데이터 유지하고 다음 환경으로
+
     def _reset_default(self, env_ids):
+        # === 디버깅: Reset 원인 분석 ===
+        # if len(env_ids) > 10:  # 너무 많은 환경이 한번에 reset되는 경우
+        #     print(f"WARNING: Large number of environments resetting: {len(env_ids)}")
+        #     # reset_buf의 원인 분석
+        #     success_count = self.success_buf[env_ids].sum().item()
+        #     failure_count = self.failure_buf[env_ids].sum().item()
+            # print(f"Success: {success_count}, Failure: {failure_count}, Total: {len(env_ids)}")
+            
+        # === 동적 시퀀스 할당 시스템 ===
+        # Reset되는 환경들에 새로운 시퀀스를 할당
+        if hasattr(self, 'available_indices') and len(self.available_indices) > 1:
+            # 전체 시퀀스를 순환하면서 할당
+            new_sequence_indices = []
+            for _ in range(len(env_ids)):
+                seq_idx_in_pool = self.sequence_counter % len(self.available_indices)
+                new_sequence_indices.append(seq_idx_in_pool)
+                self.sequence_counter += 1
+            
+            # 새로운 시퀀스 데이터를 동적으로 로드
+            self._load_new_sequences_for_envs(env_ids, new_sequence_indices)
+            # if len(env_ids) <= 10:  # 적은 수만 출력
+            #     print(f"Dynamically assigned new sequences to {len(env_ids)} environments (counter: {self.sequence_counter})")
+        
+        # 기존 시퀀스 인덱스 선택 로직
         if self.random_state_init:
             seq_idx = torch.floor(
                 self.demo_data["seq_len"][env_ids] * 0.99 * torch.rand_like(self.demo_data["seq_len"][env_ids].float())
@@ -983,10 +1079,6 @@ class DexHandImitatorRHEnv(VecTask):
     def reset_done(self):
         done_env_ids = self.reset_buf.nonzero(as_tuple=False).flatten()
         if len(done_env_ids) > 0:
-            # If all envs finished, advance batch window and reload next chunk
-            # if len(done_env_ids) == self.num_envs and hasattr(self, "_all_indices_pool"):
-            #     self._batch_offset = (self._batch_offset + self.num_envs) % max(1, len(self._all_indices_pool))
-            #     self._load_batch()
             self.reset_idx(done_env_ids)
             self.compute_observations()
 
@@ -1021,9 +1113,22 @@ class DexHandImitatorRHEnv(VecTask):
             )
             cur_mano_joint_pos = torch.cat([cur_wrist_pos[:, None], cur_mano_joint_pos], dim=1)
 
+            # Update colored sphere positions for MANO joint visualization
             for k in range(len(self.mano_joint_points)):
+                # Update the position in the tensor
                 self.mano_joint_points[k][:, :3] = cur_mano_joint_pos[:, k]
+                # Reset velocity and angular velocity to prevent unwanted movement
+                # self.mano_joint_points[k][:, 7:] = 0
+            
+            # Apply the updated positions to Isaac Gym simulation
+            # self.gym.set_actor_root_state_tensor(self.sim, gymtorch.unwrap_tensor(self._root_state))
 
+            # # Update force visualization
+            # for env_id, env_ptr in enumerate(self.envs):
+            #     for k in self.dexhand.body_names:
+            #         self.set_force_vis(
+            #             env_ptr, k, torch.norm(self.net_cf[env_id, self.dexhand_handles[k]], dim=-1) != 0
+            #         )
             self.gym.clear_lines(self.viewer)
             for env_id, env_ptr in enumerate(self.envs):
                 for k in self.dexhand.body_names:
@@ -1206,7 +1311,7 @@ def compute_imitation_reward(
     max_length: List[int],
     scale_factor: float,
     dexhand_weight_idx: Dict[str, List[int]],
-) -> Tuple[Tensor, Tensor, Tensor, Tensor]:
+) -> Tuple[Tensor, Tensor, Tensor, Tensor, Dict[str, Tensor]]:
 
     # type: (Tensor, Tensor, Tensor, Tensor, Dict[str, Tensor], Dict[str, Tensor], Tensor, float, Dict[str, List[int]]) -> Tuple[Tensor, Tensor, Tensor, Tensor, Dict[str, Tensor]]
 
@@ -1275,17 +1380,18 @@ def compute_imitation_reward(
         | (torch.abs(current_dof_vel).mean(-1) > 200)
     )  # sanity check
 
+    # GigaHands 데이터를 위해 실패 조건을 완화 (임계값을 2배로 증가)
     failed_execute = (
         (
-            (diff_thumb_tip_pos_dist > 0.04 / 0.7 * scale_factor)
-            | (diff_index_tip_pos_dist > 0.045 / 0.7 * scale_factor)
-            | (diff_middle_tip_pos_dist > 0.05 / 0.7 * scale_factor)
-            | (diff_pinky_tip_pos_dist > 0.06 / 0.7 * scale_factor)
-            | (diff_ring_tip_pos_dist > 0.06 / 0.7 * scale_factor)
-            | (diff_level_1_pos_dist > 0.07 / 0.7 * scale_factor)
-            | (diff_level_2_pos_dist > 0.08 / 0.7 * scale_factor)
+            (diff_thumb_tip_pos_dist > 0.08 / 0.7 * scale_factor)  # 0.04 -> 0.08
+            | (diff_index_tip_pos_dist > 0.09 / 0.7 * scale_factor)  # 0.045 -> 0.09
+            | (diff_middle_tip_pos_dist > 0.10 / 0.7 * scale_factor)  # 0.05 -> 0.10
+            | (diff_pinky_tip_pos_dist > 0.12 / 0.7 * scale_factor)  # 0.06 -> 0.12
+            | (diff_ring_tip_pos_dist > 0.12 / 0.7 * scale_factor)  # 0.06 -> 0.12
+            | (diff_level_1_pos_dist > 0.14 / 0.7 * scale_factor)  # 0.07 -> 0.14
+            | (diff_level_2_pos_dist > 0.16 / 0.7 * scale_factor)  # 0.08 -> 0.16
         )
-        & (running_progress_buf >= 20)
+        & (running_progress_buf >= 30)  # 20 -> 30 스텝으로 증가
     ) | error_buf
     reward_execute = (
         0.1 * reward_eef_pos

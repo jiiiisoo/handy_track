@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import os
-import json
 import random
 from enum import Enum
 from itertools import cycle
@@ -223,61 +222,6 @@ class DexHandImitatorRHEnv(VecTask):
         mujoco2gym_transf[:3, 3] = np.array([0, 0, self._table_surface_z])
         self.mujoco2gym_transf = torch.tensor(mujoco2gym_transf, device=self.sim_device, dtype=torch.float32)
 
-        # Allow using all sequences/stages by passing dataIndices=["all"] or "all"
-        def _expand_all_oakink2_indices(data_dir_root: str):
-            anno_dir = os.path.join(data_dir_root, "anno_preview")
-            program_dir = os.path.join(data_dir_root, "program", "program_info")
-            all_indices = []
-            if not os.path.isdir(anno_dir):
-                return all_indices
-            for fname in sorted(os.listdir(anno_dir)):
-                if not fname.endswith(".pkl"):
-                    continue
-                seq_hash5 = fname.split("_")[5][:5]
-                program_path = os.path.join(program_dir, os.path.splitext(fname)[0] + ".json")
-                if not os.path.isfile(program_path):
-                    continue
-                try:
-                    raw = json.load(open(program_path, "r"))
-                except Exception:
-                    continue
-                # Enumerate stages that have right-hand data; preserve original stage indices
-                original_stage_keys = list(raw.keys())
-                for orig_idx, k in enumerate(original_stage_keys):
-                    try:
-                        seg_pair = eval(k)
-                        right_range = seg_pair[1]
-                        if right_range is not None:
-                            all_indices.append(f"{seq_hash5}@{orig_idx}")
-                    except Exception:
-                        continue
-            return all_indices
-
-        if (
-            isinstance(self.dataIndices, str)
-            and self.dataIndices.lower() == "all"
-        ) or (
-            isinstance(self.dataIndices, (list, tuple))
-            and len(self.dataIndices) == 1
-            and isinstance(self.dataIndices[0], str)
-            and self.dataIndices[0].lower() == "all"
-        ):
-            data_dir_root = self.cfg["env"].get("dataDir", "/mnt/ssd1/jisoo6687/hoi_dataset/data/OakInk-v2")
-            self.dataIndices = _expand_all_oakink2_indices(data_dir_root)
-        # Shard indices across distributed ranks to avoid duplication on multi-GPU
-        try:
-            world_size = int(os.getenv("WORLD_SIZE", "1"))
-            local_rank = int(os.getenv("LOCAL_RANK", os.getenv("RANK", "0")))
-        except Exception:
-            world_size, local_rank = 1, 0
-        if world_size > 1 and len(self.dataIndices) > 0:
-            self.dataIndices = self.dataIndices[local_rank :: world_size]
-            if len(self.dataIndices) == 0:
-                # Fallback: ensure at least something allocated for this rank
-                self.dataIndices = self.dataIndices[:]
-        # print(f'Rank {local_rank}/{world_size} dataIndices: {len(self.dataIndices)}')
-        # 1/0
-        
         dataset_list = list(set([ManipDataFactory.dataset_type(data_idx) for data_idx in self.dataIndices]))
 
         self.demo_dataset_dict = {}
@@ -326,10 +270,6 @@ class DexHandImitatorRHEnv(VecTask):
 
         rigid_shape_props_asset = self.gym.get_asset_rigid_shape_properties(dexhand_asset)
         for element in rigid_shape_props_asset:
-            try:
-                element.filter = 0
-            except Exception:
-                pass
             element.friction = 4.0
             element.rolling_friction = 0.01
             element.torsion_friction = 0.01
@@ -376,61 +316,13 @@ class DexHandImitatorRHEnv(VecTask):
         assert len(self.dataIndices) == 1 or not self.rollout_state_init, "rollout_state_init only works with one data"
 
         dataset_list = list(set([ManipDataFactory.dataset_type(data_idx) for data_idx in self.dataIndices]))
-
         def segment_data(k):
             todo_list = self.dataIndices
             idx = todo_list[k % len(todo_list)]
             return self.demo_dataset_dict[ManipDataFactory.dataset_type(idx)][idx]
 
-        # === Batch-cycling setup ===
-        # Treat num_envs as the batch size. We'll iterate through all indices in chunks of size num_envs.
-        self._all_indices_pool = list(self.dataIndices)
-        self._bad_indices = set()
-        self._batch_offset = 0
-
-        def _select_index_for_env(k: int):
-            if len(self._all_indices_pool) == 0:
-                raise RuntimeError("No data indices available to load demos.")
-            return self._all_indices_pool[(self._batch_offset + k) % len(self._all_indices_pool)]
-
-        def _load_batch():
-            # Drop permanently-bad indices from the pool
-            if len(self._bad_indices) > 0:
-                self._all_indices_pool = [x for x in self._all_indices_pool if x not in self._bad_indices]
-            if len(self._all_indices_pool) == 0:
-                raise RuntimeError("No valid data indices available after filtering bad ones.")
-
-            batch = []
-            for i in tqdm(range(self.num_envs)):
-                base = self._batch_offset + i
-                loaded = False
-                # Try up to len(pool) different indices if some are broken
-                for shift in range(len(self._all_indices_pool)):
-                    idx = self._all_indices_pool[(base + shift) % len(self._all_indices_pool)]
-                    try:
-                        demo = self.demo_dataset_dict[ManipDataFactory.dataset_type(idx)][idx]
-                        batch.append(demo)
-                        loaded = True
-                        break
-                    except (KeyError, FileNotFoundError, AssertionError, IndexError) as e:
-                        print(f"Skipping invalid sequence {idx}: {e}")
-                        self._bad_indices.add(idx)
-                        continue
-                    except Exception as e:
-                        # Unknown error: mark bad and continue
-                        print(f"Skipping sequence {idx} due to unexpected error: {e}")
-                        self._bad_indices.add(idx)
-                        continue
-                if not loaded:
-                    raise RuntimeError("Failed to assemble a full batch; too many invalid sequences.")
-
-            self.demo_data = self.pack_data(batch)
-
-        self._select_index_for_env = _select_index_for_env  # store for potential debug/introspection
-        self._load_batch = _load_batch
-
-        # Initial batch load
-        self._load_batch()
+        self.demo_data = [segment_data(i) for i in tqdm(range(self.num_envs))]
+        self.demo_data = self.pack_data(self.demo_data)
 
         # Create environments
         num_per_row = int(np.sqrt(self.num_envs))
@@ -467,7 +359,7 @@ class DexHandImitatorRHEnv(VecTask):
                 self.dexhand_pose,
                 "dexhand",
                 i,
-                0,
+                (1 if self.dexhand.self_collision else 0),  # ! some hand need to allow self-collision
             )
             self.gym.enable_actor_dof_force_sensors(env_ptr, dexhand_actor)
             self.gym.set_actor_dof_properties(env_ptr, dexhand_actor, dexhand_dof_props)
@@ -475,29 +367,14 @@ class DexHandImitatorRHEnv(VecTask):
             # Create table and obstacles
             table_pose = gymapi.Transform()
             table_pose.p = gymapi.Vec3(table_pos.x, table_pos.y, table_pos.z)
-            # Make table collidable (no filter bits set)
-            # table_actor = self.gym.create_actor(
-            #     env_ptr, table_asset, table_pose, "table", i + self.num_envs, 0b11
-            # )  # ignore collision
             table_actor = self.gym.create_actor(
-                env_ptr, table_asset, table_pose, "table", i, 0
-            )
+                env_ptr, table_asset, table_pose, "table", i + self.num_envs, 0b11
+            )  # ignore collision
             table_props = self.gym.get_actor_rigid_shape_properties(env_ptr, table_actor)
-            # Only one table shape in each env
-            try:
-                table_props[0].filter = 0
-            except Exception:
-                pass
-            table_props[0].friction = 0.1
+            table_props[0].friction = 0.1  # ? only one table shape in each env
             self.gym.set_actor_rigid_shape_properties(env_ptr, table_actor, table_props)
             # set table's color to be dark gray
             self.gym.set_rigid_body_color(env_ptr, table_actor, 0, gymapi.MESH_VISUAL, gymapi.Vec3(0.1, 0.1, 0.1))
-
-            # Allow subclasses to create extra actors for this env BEFORE closing aggregation
-            try:
-                self._post_create_actors(env_ptr, i)
-            except AttributeError:
-                pass
 
             if self.aggregate_mode > 0:
                 self.gym.end_aggregate(env_ptr)
@@ -508,12 +385,6 @@ class DexHandImitatorRHEnv(VecTask):
 
         # Setup data
         self.init_data()
-
-    def _post_create_actors(self, env_ptr, env_id):
-        """Hook for subclasses to add additional actors per env during creation.
-        Base implementation does nothing.
-        """
-        return
 
     def init_data(self):
         # Setup sim handles
@@ -983,10 +854,6 @@ class DexHandImitatorRHEnv(VecTask):
     def reset_done(self):
         done_env_ids = self.reset_buf.nonzero(as_tuple=False).flatten()
         if len(done_env_ids) > 0:
-            # If all envs finished, advance batch window and reload next chunk
-            # if len(done_env_ids) == self.num_envs and hasattr(self, "_all_indices_pool"):
-            #     self._batch_offset = (self._batch_offset + self.num_envs) % max(1, len(self._all_indices_pool))
-            #     self._load_batch()
             self.reset_idx(done_env_ids)
             self.compute_observations()
 
@@ -1007,7 +874,6 @@ class DexHandImitatorRHEnv(VecTask):
         return obs, rew, done, info
 
     def pre_physics_step(self, actions):
-        self.actions = actions
 
         # ? >>> for visualization
         if not self.headless:

@@ -19,7 +19,7 @@ env:
 
   dataIndices: ${resolve_default:[],${...dataIndices}}
   data_type: ${resolve_default:"auto",${...data_type}}
-  gigahands_data_dir: ${resolve_default:"/scratch2/jisoo6687/gigahands/handpose",${...gigahands_data_dir}}
+  gigahands_data_dir: ${resolve_default:"/mnt/ssd1/jisoo6687/hoi_dataset/gigahands/handpose",${...gigahands_data_dir}}
   max_gigahands_sequences: ${resolve_default:999999,${...max_gigahands_sequences}}
   obsFutureLength: 1
 

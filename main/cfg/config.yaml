@@ -30,7 +30,8 @@ usePIDControl: False
 
 dataIndices: []
 data_type: "gigahands"  # "auto", "gigahands", "oakink2", "grabdemo", etc.
-gigahands_data_dir: "/scratch2/jisoo6687/gigahands/handpose"
+data_dir: "/mnt/ssd1/jisoo6687/hoi_dataset/OakInk-v2"
+gigahands_data_dir: "/mnt/ssd1/jisoo6687/hoi_dataset/gigahands/handpose"
 max_gigahands_sequences: 999999  # 모든 시퀀스 사용하려면 큰 값, 메모리 절약하려면 작은 값
 
 # seed - set to -1 to choose random seed
@@ -48,10 +49,10 @@ physics_engine: 'physx'
 # whether to use cpu or gpu pipeline
 pipeline: 'gpu'
 # device for running physics simulation
-sim_device: 'cuda:0'
+sim_device: 'cuda:4'
 # device to run RL
-rl_device: 'cuda:0'
-graphics_device_id: 0
+rl_device: 'cuda:4'
+graphics_device_id: 4
 
 ## PhysX arguments
 num_threads: 4 # Number of worker threads per scene used by PhysX - for CPU PhysX only.

@@ -28,7 +28,7 @@ class OakInk2DatasetDexHandLH(ManipData):
     def __init__(
         self,
         *,
-        data_dir: str = "data/OakInk-v2",
+        data_dir: str = "/mnt/ssd1/jisoo6687/hoi_dataset/OakInk-v2",
         split: str = "all",
         skip: int = 2,  # OakInk2 120Hz, while DEXHAND 60Hz
         device="cuda:0",
