@@ -149,7 +149,6 @@ tmp/*
 isolated_run
 isolated_run/*
 
-*.sh
 *.conf
 *.slurm
 *.out
